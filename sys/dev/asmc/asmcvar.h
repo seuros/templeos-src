@@ -29,6 +29,7 @@
 
 #define ASMC_MAXFANS	6
 #define ASMC_MAXVAL	32	/* Maximum SMC value size */
+#define ASMC_MAX_SENSORS	64	/* Max sensors per type */
 
 struct asmc_softc {
 	device_t 		sc_dev;
@@ -58,6 +59,15 @@ struct asmc_softc {
 	uint8_t			sc_rawval[ASMC_MAXVAL];
 	uint8_t			sc_rawlen;
 	char			sc_rawtype[5];		/* 4-char type + NUL */
+	/* Voltage/Current/Power/Light sensors */
+	char			*sc_voltage_sensors[ASMC_MAX_SENSORS];
+	int			sc_voltage_count;
+	char			*sc_current_sensors[ASMC_MAX_SENSORS];
+	int			sc_current_count;
+	char			*sc_power_sensors[ASMC_MAX_SENSORS];
+	int			sc_power_count;
+	char			*sc_light_sensors[ASMC_MAX_SENSORS];
+	int			sc_light_count;
 };
 
 /*

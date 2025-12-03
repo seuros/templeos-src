@@ -116,6 +116,12 @@ static int	asmc_raw_value_sysctl(SYSCTL_HANDLER_ARGS);
 static int	asmc_raw_len_sysctl(SYSCTL_HANDLER_ARGS);
 static int	asmc_raw_type_sysctl(SYSCTL_HANDLER_ARGS);
 
+/* Voltage/Current/Power/Light sensor support */
+static int	asmc_sensor_read(device_t, const char *, int *);
+static int	asmc_sensor_sysctl(SYSCTL_HANDLER_ARGS);
+static int	asmc_detect_sensors(device_t);
+static int	asmc_key_dump_by_index(device_t, int, char *, char *, uint8_t *);
+
 struct asmc_model {
 	const char 	 *smc_model;	/* smbios.system.product env var. */
 	const char 	 *smc_desc;	/* driver description */
@@ -861,6 +867,16 @@ asmc_detach(device_t dev)
 {
 	struct asmc_softc *sc = device_get_softc(dev);
 
+	/* Free sensor key arrays */
+	for (int i = 0; i < sc->sc_voltage_count; i++)
+		free(sc->sc_voltage_sensors[i], M_DEVBUF);
+	for (int i = 0; i < sc->sc_current_count; i++)
+		free(sc->sc_current_sensors[i], M_DEVBUF);
+	for (int i = 0; i < sc->sc_power_count; i++)
+		free(sc->sc_power_sensors[i], M_DEVBUF);
+	for (int i = 0; i < sc->sc_light_count; i++)
+		free(sc->sc_light_sensors[i], M_DEVBUF);
+
 	if (sc->sc_sms_tq) {
 		taskqueue_drain(sc->sc_sms_tq, &sc->sc_sms_task);
 		taskqueue_free(sc->sc_sms_tq);
@@ -998,6 +1014,12 @@ nosms:
 	} else {
 		sc->sc_nkeys = 0;
 	}
+
+	/*
+	 * Auto-detect and register voltage/current/power/ambient sensors.
+	 * Scans SMC keys and creates sysctls for detected sensors.
+	 */
+	asmc_detect_sensors(dev);
 
 #ifdef ASMC_DEBUG
 	asmc_dumpall(dev);
@@ -1357,6 +1379,435 @@ asmc_raw_type_sysctl(SYSCTL_HANDLER_ARGS)
 	struct asmc_softc *sc = device_get_softc(dev);
 
 	return sysctl_handle_string(oidp, sc->sc_rawtype, sizeof(sc->sc_rawtype), req);
+}
+
+/*
+ * Convert sp78 (signed 8.8 fixed-point) to millivalue.
+ * Used for: temperatures (TC0P, etc.), some current sensors (IC0C), power sensors (PC*)
+ * Returns value in milli-units (e.g., millidegrees C, milliamps, milliwatts).
+ */
+static int
+asmc_sp78_to_milli(uint8_t *buf)
+{
+	int16_t val = (buf[0] << 8) | buf[1];
+	/* Convert 8.8 fixed-point to milli-units: multiply by 1000, divide by 256 */
+	return ((int)val * 1000) / 256;
+}
+
+/*
+ * Convert sp87 (signed 8.7 fixed-point) to millivalue.
+ * Used for: IG0C (GPU current)
+ */
+static int
+asmc_sp87_to_milli(uint8_t *buf)
+{
+	int16_t val = (buf[0] << 8) | buf[1];
+	return ((int)val * 1000) / 128;
+}
+
+/*
+ * Convert sp4b (signed 4.11 fixed-point) to millivalue.
+ * Used for: IC0R, VD2R, VG0F, VG1C, IG1C (voltage/current sensors)
+ */
+static int
+asmc_sp4b_to_milli(uint8_t *buf)
+{
+	int16_t val = (buf[0] << 8) | buf[1];
+	return ((int)val * 1000) / 2048;
+}
+
+/*
+ * Convert sp5a (signed 5.10 fixed-point) to millivalue.
+ * Used for: IC0M, IC1C, IC2C, ID0R, ID1R, IM0C, IM0R, IN1R (current sensors)
+ */
+static int
+asmc_sp5a_to_milli(uint8_t *buf)
+{
+	int16_t val = (buf[0] << 8) | buf[1];
+	return ((int)val * 1000) / 1024;
+}
+
+/*
+ * Convert sp69 (signed 6.9 fixed-point) to millivalue.
+ * Used for: IN0R (current sensor)
+ */
+static int
+asmc_sp69_to_milli(uint8_t *buf)
+{
+	int16_t val = (buf[0] << 8) | buf[1];
+	return ((int)val * 1000) / 512;
+}
+
+/*
+ * Convert sp96 (signed 9.6 fixed-point) to millivalue.
+ * Used for: PC* (power sensors on some models)
+ */
+static int
+asmc_sp96_to_milli(uint8_t *buf)
+{
+	int16_t val = (buf[0] << 8) | buf[1];
+	return ((int)val * 1000) / 64;
+}
+
+/*
+ * Convert sp2d (signed 2.13 fixed-point) to millivalue.
+ * Used for: VC0C, VC0M (voltage sensors)
+ */
+static int
+asmc_sp2d_to_milli(uint8_t *buf)
+{
+	int16_t val = (buf[0] << 8) | buf[1];
+	return ((int)val * 1000) / 8192;
+}
+
+static int
+asmc_sensor_type_supported(const char *type)
+{
+	return (strncmp(type, "sp78", 4) == 0 ||
+	    strncmp(type, "sp87", 4) == 0 ||
+	    strncmp(type, "sp4b", 4) == 0 ||
+	    strncmp(type, "sp5a", 4) == 0 ||
+	    strncmp(type, "sp69", 4) == 0 ||
+	    strncmp(type, "sp96", 4) == 0 ||
+	    strncmp(type, "sp2d", 4) == 0 ||
+	    strncmp(type, "ui16", 4) == 0);
+}
+
+/*
+ * Generic sensor value reader with automatic type conversion.
+ * Reads an SMC key, detects its type, and converts to millivalue.
+ * Returns 0 on success, -1 on error.
+ */
+static int
+asmc_sensor_read(device_t dev, const char *key, int *millivalue)
+{
+	uint8_t buf[2];
+	char type[5];
+	uint8_t len;
+	int error;
+
+	/* Get key type and length */
+	error = asmc_key_getinfo(dev, key, &len, type);
+	if (error != 0)
+		return (-1);
+
+	/* Verify 2-byte value */
+	if (len != 2) {
+		if (bootverbose)
+			device_printf(dev, "asmc_sensor_read: key %s has unexpected length %d\n",
+			    key, len);
+		return (-1);
+	}
+
+	/* Read raw value */
+	error = asmc_key_read(dev, key, buf, sizeof(buf));
+	if (error != 0)
+		return (-1);
+
+	/* Convert based on type */
+	if (strncmp(type, "sp78", 4) == 0) {
+		*millivalue = asmc_sp78_to_milli(buf);
+	} else if (strncmp(type, "sp87", 4) == 0) {
+		*millivalue = asmc_sp87_to_milli(buf);
+	} else if (strncmp(type, "sp4b", 4) == 0) {
+		*millivalue = asmc_sp4b_to_milli(buf);
+	} else if (strncmp(type, "sp5a", 4) == 0) {
+		*millivalue = asmc_sp5a_to_milli(buf);
+	} else if (strncmp(type, "sp69", 4) == 0) {
+		*millivalue = asmc_sp69_to_milli(buf);
+	} else if (strncmp(type, "sp96", 4) == 0) {
+		*millivalue = asmc_sp96_to_milli(buf);
+	} else if (strncmp(type, "sp2d", 4) == 0) {
+		*millivalue = asmc_sp2d_to_milli(buf);
+	} else if (strncmp(type, "ui16", 4) == 0) {
+		/* Raw 16-bit unsigned value (no conversion) */
+		*millivalue = (buf[0] << 8) | buf[1];
+	} else {
+		if (bootverbose)
+			device_printf(dev, "asmc_sensor_read: unknown type '%s' for key %s\n",
+			    type, key);
+		return (-1);
+	}
+
+	return (0);
+}
+
+/*
+ * Generic sensor sysctl handler for voltage/current/power/light sensors.
+ * arg2 encodes: sensor_type (high byte) | sensor_index (low byte)
+ * Sensor types: 'V'=voltage, 'I'=current, 'P'=power, 'L'=light
+ */
+static int
+asmc_sensor_sysctl(SYSCTL_HANDLER_ARGS)
+{
+	device_t dev = (device_t) arg1;
+	struct asmc_softc *sc = device_get_softc(dev);
+	int error, val;
+	int sensor_type = (arg2 >> 8) & 0xFF;
+	int sensor_idx = arg2 & 0xFF;
+	const char *key = NULL;
+
+	/* Select sensor based on type and index */
+	switch (sensor_type) {
+	case 'V':  /* Voltage */
+		if (sensor_idx < sc->sc_voltage_count)
+			key = sc->sc_voltage_sensors[sensor_idx];
+		break;
+	case 'I':  /* Current */
+		if (sensor_idx < sc->sc_current_count)
+			key = sc->sc_current_sensors[sensor_idx];
+		break;
+	case 'P':  /* Power */
+		if (sensor_idx < sc->sc_power_count)
+			key = sc->sc_power_sensors[sensor_idx];
+		break;
+	case 'L':  /* Light */
+		if (sensor_idx < sc->sc_light_count)
+			key = sc->sc_light_sensors[sensor_idx];
+		break;
+	default:
+		return (EINVAL);
+	}
+
+	if (key == NULL)
+		return (ENOENT);
+
+	/* Read and convert sensor value */
+	if (asmc_sensor_read(dev, key, &val) != 0)
+		return (EIO);
+
+	error = sysctl_handle_int(oidp, &val, 0, req);
+	return (error);
+}
+
+/*
+ * Detect and register voltage/current/power/ambient sensors.
+ * Scans all SMC keys and identifies sensor keys by prefix.
+ * Returns 0 on success, -1 on error.
+ */
+static int
+asmc_detect_sensors(device_t dev)
+{
+	struct asmc_softc *sc = device_get_softc(dev);
+	struct sysctl_ctx_list *sysctlctx;
+	struct sysctl_oid *tree_node;
+	char key[5];
+	char type[5];
+	uint8_t len;
+	u_int nkeys;
+	u_int i;
+	int error;
+	char *sensor_key;
+
+	/* Initialize counts */
+	sc->sc_voltage_count = 0;
+	sc->sc_current_count = 0;
+	sc->sc_power_count = 0;
+	sc->sc_light_count = 0;
+
+	if (sc->sc_nkeys == 0)
+		return (0);
+	nkeys = sc->sc_nkeys;
+
+	/* Scan all keys for voltage/current/power/ambient light sensors */
+	for (i = 0; i < nkeys; i++) {
+		/* Get key name by index */
+		error = asmc_key_dump_by_index(dev, i, key, type, &len);
+		if (error != 0)
+			continue;
+		if (!asmc_sensor_type_supported(type))
+			continue;
+
+		/* Check for voltage sensors (VC*, VD*, VG*, VP*, VI*) */
+		if ((key[0] == 'V' && (key[1] == 'C' || key[1] == 'D' || key[1] == 'G' ||
+		     key[1] == 'P' || key[1] == 'I')) && len == 2) {
+			if (sc->sc_voltage_count >= ASMC_MAX_SENSORS)
+				continue;
+			sensor_key = malloc(5, M_DEVBUF, M_WAITOK);
+			if (sensor_key == NULL)
+				continue;
+			memcpy(sensor_key, key, 5);
+			sc->sc_voltage_sensors[sc->sc_voltage_count++] = sensor_key;
+		}
+		/* Check for current sensors (I{C,D,G,M,N,O,H,P,B,A,L}*) */
+		else if ((key[0] == 'I' && (key[1] == 'C' || key[1] == 'D' || key[1] == 'G' ||
+		          key[1] == 'M' || key[1] == 'N' || key[1] == 'O' || key[1] == 'H' ||
+		          key[1] == 'P' || key[1] == 'B' || key[1] == 'A' || key[1] == 'L')) && len == 2) {
+			if (sc->sc_current_count >= ASMC_MAX_SENSORS)
+				continue;
+			sensor_key = malloc(5, M_DEVBUF, M_WAITOK);
+			if (sensor_key == NULL)
+				continue;
+			memcpy(sensor_key, key, 5);
+			sc->sc_current_sensors[sc->sc_current_count++] = sensor_key;
+		}
+		/* Check for power sensors (P{C,D,N,S,T,H,F,Z,z}*) */
+		else if ((key[0] == 'P' && (key[1] == 'C' || key[1] == 'D' || key[1] == 'N' ||
+		          key[1] == 'S' || key[1] == 'T' || key[1] == 'H' || key[1] == 'F' ||
+		          key[1] == 'Z' || key[1] == 'z')) && len == 2) {
+			if (sc->sc_power_count >= ASMC_MAX_SENSORS)
+				continue;
+			sensor_key = malloc(5, M_DEVBUF, M_WAITOK);
+			if (sensor_key == NULL)
+				continue;
+			memcpy(sensor_key, key, 5);
+			sc->sc_power_sensors[sc->sc_power_count++] = sensor_key;
+		}
+		/* Check for ambient light sensors (ALV*, ALS*) */
+		else if (key[0] == 'A' && key[1] == 'L' && (key[2] == 'V' || key[2] == 'S') && len == 2) {
+			if (sc->sc_light_count >= ASMC_MAX_SENSORS)
+				continue;
+			sensor_key = malloc(5, M_DEVBUF, M_WAITOK);
+			if (sensor_key == NULL)
+				continue;
+			memcpy(sensor_key, key, 5);
+			sc->sc_light_sensors[sc->sc_light_count++] = sensor_key;
+		}
+	}
+
+	if (bootverbose)
+		device_printf(dev, "detected %d voltage, %d current, %d power, %d ambient light sensors\n",
+		    sc->sc_voltage_count, sc->sc_current_count, sc->sc_power_count, sc->sc_light_count);
+
+	/* Register sysctls for detected sensors */
+	sysctlctx = device_get_sysctl_ctx(dev);
+
+	/* Voltage sensors */
+	if (sc->sc_voltage_count > 0) {
+		tree_node = SYSCTL_ADD_NODE(sysctlctx,
+		    SYSCTL_CHILDREN(device_get_sysctl_tree(dev)), OID_AUTO,
+		    "voltage", CTLFLAG_RD | CTLFLAG_MPSAFE, 0, "Voltage sensors (millivolts)");
+
+		for (i = 0; i < sc->sc_voltage_count; i++) {
+			SYSCTL_ADD_PROC(sysctlctx, SYSCTL_CHILDREN(tree_node),
+			    OID_AUTO, sc->sc_voltage_sensors[i],
+			    CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_NEEDGIANT,
+			    dev, ('V' << 8) | i, asmc_sensor_sysctl, "I",
+			    "Voltage sensor (millivolts)");
+		}
+	}
+
+	/* Current sensors */
+	if (sc->sc_current_count > 0) {
+		tree_node = SYSCTL_ADD_NODE(sysctlctx,
+		    SYSCTL_CHILDREN(device_get_sysctl_tree(dev)), OID_AUTO,
+		    "current", CTLFLAG_RD | CTLFLAG_MPSAFE, 0, "Current sensors (milliamps)");
+
+		for (i = 0; i < sc->sc_current_count; i++) {
+			SYSCTL_ADD_PROC(sysctlctx, SYSCTL_CHILDREN(tree_node),
+			    OID_AUTO, sc->sc_current_sensors[i],
+			    CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_NEEDGIANT,
+			    dev, ('I' << 8) | i, asmc_sensor_sysctl, "I",
+			    "Current sensor (milliamps)");
+		}
+	}
+
+	/* Power sensors */
+	if (sc->sc_power_count > 0) {
+		tree_node = SYSCTL_ADD_NODE(sysctlctx,
+		    SYSCTL_CHILDREN(device_get_sysctl_tree(dev)), OID_AUTO,
+		    "power", CTLFLAG_RD | CTLFLAG_MPSAFE, 0, "Power sensors (milliwatts)");
+
+		for (i = 0; i < sc->sc_power_count; i++) {
+			SYSCTL_ADD_PROC(sysctlctx, SYSCTL_CHILDREN(tree_node),
+			    OID_AUTO, sc->sc_power_sensors[i],
+			    CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_NEEDGIANT,
+			    dev, ('P' << 8) | i, asmc_sensor_sysctl, "I",
+			    "Power sensor (milliwatts)");
+		}
+	}
+
+	/* Ambient light sensors */
+	if (sc->sc_light_count > 0) {
+		tree_node = SYSCTL_ADD_NODE(sysctlctx,
+		    SYSCTL_CHILDREN(device_get_sysctl_tree(dev)), OID_AUTO,
+		    "ambient", CTLFLAG_RD | CTLFLAG_MPSAFE, 0, "Ambient light sensors");
+
+		for (i = 0; i < sc->sc_light_count; i++) {
+			SYSCTL_ADD_PROC(sysctlctx, SYSCTL_CHILDREN(tree_node),
+			    OID_AUTO, sc->sc_light_sensors[i],
+			    CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_NEEDGIANT,
+			    dev, ('L' << 8) | i, asmc_sensor_sysctl, "I",
+			    "Light sensor value");
+		}
+	}
+
+	return (0);
+}
+
+/*
+ * Helper function to get key info by index (for sensor detection).
+ * Returns 0 on success, -1 on error.
+ */
+static int
+asmc_key_dump_by_index(device_t dev, int index, char *key_out, char *type_out, uint8_t *len_out)
+{
+	struct asmc_softc *sc = device_get_softc(dev);
+	uint8_t index_buf[4];
+	uint8_t key_buf[4];
+	uint8_t type_buf[6];
+	int error = -1, try = 0;
+	int i;
+
+	mtx_lock_spin(&sc->sc_mtx);
+
+	index_buf[0] = (index >> 24) & 0xff;
+	index_buf[1] = (index >> 16) & 0xff;
+	index_buf[2] = (index >> 8) & 0xff;
+	index_buf[3] = index & 0xff;
+
+begin:
+	/* Read key name by index (command 0x12) */
+	if (asmc_command(dev, 0x12))
+		goto out;
+
+	for (i = 0; i < 4; i++) {
+		ASMC_DATAPORT_WRITE(sc, index_buf[i]);
+		if (asmc_wait(dev, 0x04))
+			goto out;
+	}
+
+	ASMC_DATAPORT_WRITE(sc, 4);
+
+	for (i = 0; i < 4; i++) {
+		if (asmc_wait(dev, 0x05))
+			goto out;
+		key_buf[i] = ASMC_DATAPORT_READ(sc);
+	}
+
+	/* Get key info (type and length) using command 0x13 */
+	if (asmc_command(dev, 0x13))
+		goto out;
+
+	for (i = 0; i < 4; i++) {
+		ASMC_DATAPORT_WRITE(sc, key_buf[i]);
+		if (asmc_wait(dev, 0x04))
+			goto out;
+	}
+
+	ASMC_DATAPORT_WRITE(sc, 6);
+
+	for (i = 0; i < 6; i++) {
+		if (asmc_wait(dev, 0x05))
+			goto out;
+		type_buf[i] = ASMC_DATAPORT_READ(sc);
+	}
+
+	/* Success - copy results */
+	memcpy(key_out, key_buf, 4);
+	key_out[4] = '\0';
+	*len_out = type_buf[0];		/* Length is first byte */
+	memcpy(type_out, &type_buf[1], 4);
+	type_out[4] = '\0';
+	error = 0;
+
+out:
+	if (error) {
+		if (++try < 10) goto begin;
+	}
+
+	mtx_unlock_spin(&sc->sc_mtx);
+	return (error);
 }
 
 static int
