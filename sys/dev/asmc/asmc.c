@@ -109,6 +109,13 @@ static int 	asmc_mbp_sysctl_light_right(SYSCTL_HANDLER_ARGS);
 static int 	asmc_mbp_sysctl_light_control(SYSCTL_HANDLER_ARGS);
 static int 	asmc_mbp_sysctl_light_left_10byte(SYSCTL_HANDLER_ARGS);
 
+/* Raw key access */
+static int	asmc_key_getinfo(device_t, const char *, uint8_t *, char *);
+static int	asmc_raw_key_sysctl(SYSCTL_HANDLER_ARGS);
+static int	asmc_raw_value_sysctl(SYSCTL_HANDLER_ARGS);
+static int	asmc_raw_len_sysctl(SYSCTL_HANDLER_ARGS);
+static int	asmc_raw_type_sysctl(SYSCTL_HANDLER_ARGS);
+
 struct asmc_model {
 	const char 	 *smc_model;	/* smbios.system.product env var. */
 	const char 	 *smc_desc;	/* driver description */
@@ -723,6 +730,41 @@ asmc_attach(device_t dev)
 		    "Keyboard backlight brightness control");
 	}
 
+	/*
+	 * Raw SMC key access for debugging.
+	 */
+	sc->sc_raw_tree = SYSCTL_ADD_NODE(sysctlctx,
+	    SYSCTL_CHILDREN(device_get_sysctl_tree(dev)), OID_AUTO,
+	    "raw", CTLFLAG_RD | CTLFLAG_MPSAFE, 0, "Raw SMC key access");
+
+	SYSCTL_ADD_PROC(sysctlctx,
+	    SYSCTL_CHILDREN(sc->sc_raw_tree),
+	    OID_AUTO, "key",
+	    CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_NEEDGIANT,
+	    dev, 0, asmc_raw_key_sysctl, "A",
+	    "SMC key name (4 chars)");
+
+	SYSCTL_ADD_PROC(sysctlctx,
+	    SYSCTL_CHILDREN(sc->sc_raw_tree),
+	    OID_AUTO, "value",
+	    CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_NEEDGIANT,
+	    dev, 0, asmc_raw_value_sysctl, "A",
+	    "SMC key value (hex string)");
+
+	SYSCTL_ADD_PROC(sysctlctx,
+	    SYSCTL_CHILDREN(sc->sc_raw_tree),
+	    OID_AUTO, "len",
+	    CTLTYPE_U8 | CTLFLAG_RD | CTLFLAG_NEEDGIANT,
+	    dev, 0, asmc_raw_len_sysctl, "CU",
+	    "SMC key value length");
+
+	SYSCTL_ADD_PROC(sysctlctx,
+	    SYSCTL_CHILDREN(sc->sc_raw_tree),
+	    OID_AUTO, "type",
+	    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_NEEDGIANT,
+	    dev, 0, asmc_raw_type_sysctl, "A",
+	    "SMC key type (4 chars)");
+
 	if (model->smc_sms_x == NULL)
 		goto nosms;
 
@@ -1157,6 +1199,156 @@ out:
 	return (error);
 }
 #endif
+
+/*
+ * Get key info (length and type) from SMC using command 0x13.
+ * Returns 0 on success, -1 on failure.
+ * If len is non-NULL, stores the key's value length.
+ * If type is non-NULL, stores the 4-char type string (must be at least 5 bytes).
+ */
+static int
+asmc_key_getinfo(device_t dev, const char *key, uint8_t *len, char *type)
+{
+	struct asmc_softc *sc = device_get_softc(dev);
+	uint8_t info[6];
+	int i, error = -1, try = 0;
+
+	mtx_lock_spin(&sc->sc_mtx);
+
+begin:
+	if (asmc_command(dev, 0x13))
+		goto out;
+
+	for (i = 0; i < 4; i++) {
+		ASMC_DATAPORT_WRITE(sc, key[i]);
+		if (asmc_wait(dev, 0x04))
+			goto out;
+	}
+
+	ASMC_DATAPORT_WRITE(sc, 6);
+
+	for (i = 0; i < 6; i++) {
+		if (asmc_wait(dev, 0x05))
+			goto out;
+		info[i] = ASMC_DATAPORT_READ(sc);
+	}
+
+	error = 0;
+out:
+	if (error && ++try < 10)
+		goto begin;
+	mtx_unlock_spin(&sc->sc_mtx);
+
+	if (error == 0) {
+		if (len != NULL)
+			*len = info[0];
+		if (type != NULL) {
+			for (i = 0; i < 4; i++)
+				type[i] = info[i + 1];
+			type[4] = '\0';
+		}
+	}
+	return (error);
+}
+
+/*
+ * Raw SMC key access sysctls - enables reading/writing any SMC key by name
+ * Usage:
+ *   sysctl dev.asmc.0.raw.key=AUPO   # Set key, auto-detects length
+ *   sysctl dev.asmc.0.raw.value      # Read current value (hex bytes)
+ *   sysctl dev.asmc.0.raw.value=01   # Write new value
+ */
+static int
+asmc_raw_key_sysctl(SYSCTL_HANDLER_ARGS)
+{
+	device_t dev = (device_t) arg1;
+	struct asmc_softc *sc = device_get_softc(dev);
+	char newkey[5];
+	uint8_t keylen;
+	int error;
+
+	strlcpy(newkey, sc->sc_rawkey, sizeof(newkey));
+	error = sysctl_handle_string(oidp, newkey, sizeof(newkey), req);
+	if (error || req->newptr == NULL)
+		return (error);
+
+	if (strlen(newkey) != 4)
+		return (EINVAL);
+
+	/* Get key info to auto-detect length and type */
+	if (asmc_key_getinfo(dev, newkey, &keylen, sc->sc_rawtype) != 0)
+		return (ENOENT);
+
+	if (keylen > ASMC_MAXVAL)
+		keylen = ASMC_MAXVAL;
+
+	strlcpy(sc->sc_rawkey, newkey, sizeof(sc->sc_rawkey));
+	sc->sc_rawlen = keylen;
+	memset(sc->sc_rawval, 0, sizeof(sc->sc_rawval));
+
+	/* Read the key value */
+	asmc_key_read(dev, sc->sc_rawkey, sc->sc_rawval, sc->sc_rawlen);
+
+	return (0);
+}
+
+static int
+asmc_raw_value_sysctl(SYSCTL_HANDLER_ARGS)
+{
+	device_t dev = (device_t) arg1;
+	struct asmc_softc *sc = device_get_softc(dev);
+	char hexbuf[ASMC_MAXVAL * 2 + 1];
+	int error, i;
+
+	/* Refresh from SMC */
+	if (sc->sc_rawkey[0] != '\0') {
+		asmc_key_read(dev, sc->sc_rawkey, sc->sc_rawval, sc->sc_rawlen > 0 ? sc->sc_rawlen : ASMC_MAXVAL);
+	}
+
+	/* Format as hex string */
+	for (i = 0; i < sc->sc_rawlen && i < ASMC_MAXVAL; i++)
+		snprintf(hexbuf + i * 2, 3, "%02x", sc->sc_rawval[i]);
+	hexbuf[i * 2] = '\0';
+
+	error = sysctl_handle_string(oidp, hexbuf, sizeof(hexbuf), req);
+	if (error || req->newptr == NULL)
+		return (error);
+
+	/* Parse hex and write */
+	if (sc->sc_rawkey[0] == '\0')
+		return (EINVAL);
+
+	memset(sc->sc_rawval, 0, sizeof(sc->sc_rawval));
+	for (i = 0; i < sc->sc_rawlen && hexbuf[i*2] && hexbuf[i*2+1]; i++) {
+		unsigned int val;
+		char tmp[3] = { hexbuf[i*2], hexbuf[i*2+1], 0 };
+		if (sscanf(tmp, "%02x", &val) == 1)
+			sc->sc_rawval[i] = (uint8_t)val;
+	}
+
+	if (asmc_key_write(dev, sc->sc_rawkey, sc->sc_rawval, sc->sc_rawlen) != 0)
+		return (EIO);
+
+	return (0);
+}
+
+static int
+asmc_raw_len_sysctl(SYSCTL_HANDLER_ARGS)
+{
+	device_t dev = (device_t) arg1;
+	struct asmc_softc *sc = device_get_softc(dev);
+
+	return sysctl_handle_8(oidp, &sc->sc_rawlen, 0, req);
+}
+
+static int
+asmc_raw_type_sysctl(SYSCTL_HANDLER_ARGS)
+{
+	device_t dev = (device_t) arg1;
+	struct asmc_softc *sc = device_get_softc(dev);
+
+	return sysctl_handle_string(oidp, sc->sc_rawtype, sizeof(sc->sc_rawtype), req);
+}
 
 static int
 asmc_key_write(device_t dev, const char *key, uint8_t *buf, uint8_t len)

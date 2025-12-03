@@ -28,6 +28,7 @@
  */
 
 #define ASMC_MAXFANS	6
+#define ASMC_MAXVAL	32	/* Maximum SMC value size */
 
 struct asmc_softc {
 	device_t 		sc_dev;
@@ -51,6 +52,12 @@ struct asmc_softc {
 	struct taskqueue 	*sc_sms_tq;
 	struct task 		sc_sms_task;
 	uint8_t			sc_sms_intr_works;
+	/* Raw key access */
+	struct sysctl_oid	*sc_raw_tree;
+	char			sc_rawkey[5];		/* 4-char key + NUL */
+	uint8_t			sc_rawval[ASMC_MAXVAL];
+	uint8_t			sc_rawlen;
+	char			sc_rawtype[5];		/* 4-char type + NUL */
 };
 
 /*
