@@ -296,6 +296,106 @@ static const uint8_t hkbd_trtab[256] = {
 
 static const uint8_t hkbd_boot_desc[] = { HID_KBD_BOOTPROTO_DESCR() };
 
+/*
+ * Apple ISO keyboard models that require key swapping.
+ * Key code swapping between [<>] and [^°] is enabled ONLY for keyboards
+ * that have the APPLE_ISO_TILDE_QUIRK flag in Linux hid-apple.c.
+ * This list is based on Linux kernel mainline hid-apple.c and hid-ids.h.
+ */
+static const uint16_t hkbd_apple_iso_products[] = {
+	0x020f,	/* APPLE_FOUNTAIN_ISO */
+	0x0215,	/* APPLE_GEYSER_ISO */
+	0x0218,	/* APPLE_GEYSER3_ISO */
+	0x021b,	/* APPLE_GEYSER4_ISO */
+	0x021e,	/* APPLE_ALU_MINI_ISO */
+	0x0224,	/* APPLE_WELLSPRING_ISO */
+	0x022a,	/* APPLE_GEYSER4_HF_ISO */
+	0x0231,	/* APPLE_WELLSPRING2_ISO */
+	0x0237,	/* APPLE_WELLSPRING3_ISO */
+	0x0240,	/* APPLE_WELLSPRING4_ISO */
+	0x0243,	/* APPLE_WELLSPRING4A_ISO */
+	0x0246,	/* APPLE_WELLSPRING5_ISO */
+	0x024a,	/* APPLE_WELLSPRING6A_ISO */
+	0x024d,	/* APPLE_WELLSPRING6_ISO */
+	0x0253,	/* APPLE_WELLSPRING5A_ISO */
+	0x025a,	/* APPLE_WELLSPRING7A_ISO */
+	0x0263,	/* APPLE_WELLSPRING7_ISO */
+	0x0267,	/* APPLE_MAGIC_KEYBOARD_2015 */
+	0x026c,	/* APPLE_MAGIC_KEYBOARD_NUMPAD_2015 */
+	0x0273,	/* APPLE_WELLSPRING9_ISO */
+	0x0278,	/* APPLE_WELLSPRINGT2_J680_ALT */
+	0x027a,	/* APPLE_WELLSPRINGT2_J140K */
+	0x027b,	/* APPLE_WELLSPRINGT2_J132 */
+	0x027c,	/* APPLE_WELLSPRINGT2_J680 */
+	0x027d,	/* APPLE_WELLSPRINGT2_J213 */
+	0x027e,	/* APPLE_WELLSPRINGT2_J214K */
+	0x027f,	/* APPLE_WELLSPRINGT2_J223 */
+	0x0280,	/* APPLE_WELLSPRINGT2_J230K */
+	0x0291,	/* APPLE_WELLSPRING8_ISO */
+	0x029a,	/* APPLE_MAGIC_KEYBOARD_FINGERPRINT_2021 */
+	0x029c,	/* APPLE_MAGIC_KEYBOARD_2021 */
+	0x029f,	/* APPLE_MAGIC_KEYBOARD_NUMPAD_2021 */
+	0x0320,	/* APPLE_MAGIC_KEYBOARD_2024 */
+	0x0321,	/* APPLE_MAGIC_KEYBOARD_FINGERPRINT_2024 */
+	0x0322,	/* APPLE_MAGIC_KEYBOARD_NUMPAD_2024 */
+	0x0340,	/* APPLE_WELLSPRINGT2_J152F */
+};
+#define HKBD_APPLE_ISO_COUNT	\
+	(sizeof(hkbd_apple_iso_products) / sizeof(hkbd_apple_iso_products[0]))
+
+/*
+ * Apple keyboard models that should have Fn key support.
+ * Most Apple keyboards report Fn key in HID descriptor, but some models
+ * (particularly older wired keyboards) may not expose the Fn key HID usage
+ * (0xFFFF:0x0003). This table is based on Linux hid-apple.c APPLE_HAS_FN quirk.
+ */
+static const uint16_t hkbd_apple_fn_products[] = {
+	0x020f,	/* APPLE_FOUNTAIN_ISO */
+	0x0214,	/* APPLE_FOUNTAIN_ANSI */
+	0x0215,	/* APPLE_GEYSER_ISO */
+	0x0217,	/* APPLE_GEYSER_ANSI */
+	0x0218,	/* APPLE_GEYSER3_ISO */
+	0x021a,	/* APPLE_GEYSER3_ANSI */
+	0x021b,	/* APPLE_GEYSER4_ISO */
+	0x021d,	/* APPLE_GEYSER4_ANSI */
+	0x021e,	/* APPLE_ALU_MINI_ISO */
+	0x021f,	/* APPLE_ALU_MINI_ANSI */
+	0x0221,	/* APPLE_ALU_ISO */
+	0x0220,	/* APPLE_ALU_ANSI */
+	0x0224,	/* APPLE_WELLSPRING_ISO */
+	0x0225,	/* APPLE_WELLSPRING_ANSI */
+	0x022a,	/* APPLE_GEYSER4_HF_ISO */
+	0x0229,	/* APPLE_GEYSER4_HF_ANSI */
+	0x0250,	/* APPLE_ALU_REVB_ISO */
+	0x0252,	/* APPLE_ALU_REVB_ANSI */
+	0x0231,	/* APPLE_WELLSPRING2_ISO */
+	0x0230,	/* APPLE_WELLSPRING2_ANSI */
+	0x0234,	/* APPLE_WELLSPRING3_ISO */
+	0x0236,	/* APPLE_WELLSPRING3_ANSI */
+	0x0237,	/* APPLE_WELLSPRING4_ISO */
+	0x0239,	/* APPLE_WELLSPRING4_ANSI */
+	0x023a,	/* APPLE_WELLSPRING4A_ISO */
+	0x023c,	/* APPLE_WELLSPRING4A_ANSI */
+	0x023d,	/* APPLE_WELLSPRING5_ISO */
+	0x023f,	/* APPLE_WELLSPRING5_ANSI */
+	0x0240,	/* APPLE_WELLSPRING6_ISO */
+	0x0242,	/* APPLE_WELLSPRING6_ANSI */
+	0x0243,	/* APPLE_WELLSPRING5A_ISO */
+	0x0245,	/* APPLE_WELLSPRING5A_ANSI */
+	0x0246,	/* APPLE_WELLSPRING6A_ISO */
+	0x0248,	/* APPLE_WELLSPRING6A_ANSI */
+	0x0249,	/* APPLE_WELLSPRING7_ISO */
+	0x024b,	/* APPLE_WELLSPRING7_ANSI */
+	0x024c,	/* APPLE_WELLSPRING7A_ISO */
+	0x024e,	/* APPLE_WELLSPRING7A_ANSI */
+	0x024f,	/* APPLE_WELLSPRING8_ISO */
+	0x0251,	/* APPLE_WELLSPRING8_ANSI */
+	0x0253,	/* APPLE_WELLSPRING9_ISO */
+	0x0255,	/* APPLE_WELLSPRING9_ANSI */
+};
+#define HKBD_APPLE_FN_COUNT	\
+	(sizeof(hkbd_apple_fn_products) / sizeof(hkbd_apple_fn_products[0]))
+
 /* prototypes */
 static void	hkbd_timeout(void *);
 static int	hkbd_set_leds(struct hkbd_softc *, uint8_t);
@@ -789,8 +889,7 @@ hkbd_parse_hid(struct hkbd_softc *sc, const uint8_t *ptr, uint32_t len,
 	    hid_input, tlc_index, 0, &sc->sc_loc_apple_eject, &flags,
 	    &sc->sc_id_apple_eject, NULL)) {
 		if (flags & HIO_VARIABLE)
-			sc->sc_flags |= HKBD_FLAG_APPLE_EJECT |
-			    HKBD_FLAG_APPLE_SWAP;
+			sc->sc_flags |= HKBD_FLAG_APPLE_EJECT;
 		DPRINTFN(1, "Found Apple eject-key\n");
 	}
 	if (hidbus_locate(ptr, len,
@@ -944,6 +1043,47 @@ hkbd_attach(device_t dev)
 		}
 
 		hkbd_parse_hid(sc, hkbd_boot_desc, sizeof(hkbd_boot_desc), 0);
+	}
+
+	/*
+	 * Check if this is an Apple ISO keyboard.
+	 * Enable key swapping for ISO layout models based on vendor/product ID.
+	 * This must be done AFTER hkbd_parse_hid() which clears HID_MASK flags.
+	 */
+	if (hw->idVendor == 0x05ac) {	/* USB_VENDOR_ID_APPLE */
+		for (n = 0; n < HKBD_APPLE_ISO_COUNT; n++) {
+			if (hw->idProduct == hkbd_apple_iso_products[n]) {
+				sc->sc_flags |= HKBD_FLAG_APPLE_SWAP;
+				DPRINTFN(1, "Enabled APPLE_SWAP for ISO keyboard "
+				    "(vendor=0x%04x, product=0x%04x)\n",
+				    hw->idVendor, hw->idProduct);
+				break;
+			}
+		}
+	}
+
+	/*
+	 * Check if this keyboard should have Fn key support.
+	 * Some Apple keyboards (particularly older wired models) don't expose
+	 * the Fn key in their HID descriptor even though they physically have
+	 * an Fn key. If the keyboard is in our Fn products table but the HID
+	 * usage wasn't found, log a warning to inform the user.
+	 */
+	if (hw->idVendor == 0x05ac) {	/* USB_VENDOR_ID_APPLE */
+		bool should_have_fn = false;
+		for (n = 0; n < HKBD_APPLE_FN_COUNT; n++) {
+			if (hw->idProduct == hkbd_apple_fn_products[n]) {
+				should_have_fn = true;
+				break;
+			}
+		}
+		if (should_have_fn && !(sc->sc_flags & HKBD_FLAG_APPLE_FN)) {
+			device_printf(dev, "Fn key not found in HID descriptor "
+			    "(vendor=0x%04x, product=0x%04x). Fn key functionality "
+			    "will not be available. This is a known limitation of "
+			    "some Apple wired keyboards.\n",
+			    hw->idVendor, hw->idProduct);
+		}
 	}
 
 	/* ignore if SETIDLE fails, hence it is not crucial */
