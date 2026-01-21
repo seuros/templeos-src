@@ -49,9 +49,9 @@
 #		like the -V command
 #
 
-TYPE="FreeBSD"
+TYPE="ChaosBSD"
 REVISION="16.0"
-BRANCH="CURRENT"
+BRANCH="QUANTUM"
 if [ -n "${BRANCH_OVERRIDE}" ]; then
 	BRANCH=${BRANCH_OVERRIDE}
 fi
