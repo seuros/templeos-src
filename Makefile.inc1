@@ -1686,7 +1686,7 @@ installetc: .MAKE .PHONY
 # buildkernel and installkernel
 #
 # Which kernels to build and/or install is specified by setting
-# KERNCONF. If not defined a GENERIC kernel is built/installed.
+# KERNCONF. If not defined a CHAOS kernel is built/installed.
 # Only the existing (depending TARGET) config files are used
 # for building kernels and only the first of these is designated
 # as the one being installed.
@@ -1707,7 +1707,7 @@ KERNCONF=${KERNFAST}
 .endif
 GENERIC_KERNCONF_SUFX_powerpc64=	64
 GENERIC_KERNCONF_SUFX_powerpc64le=	64LE
-GENERIC_KERNCONF?=	${GENERIC_KERNCONF_${TARGET_ARCH}:UGENERIC${GENERIC_KERNCONF_SUFX_${TARGET_ARCH}}}
+GENERIC_KERNCONF?=	${GENERIC_KERNCONF_${TARGET_ARCH}:UCHAOS${GENERIC_KERNCONF_SUFX_${TARGET_ARCH}}}
 INSTKERNNAME?=	kernel
 
 KERNSRCDIR?=	${.CURDIR}/sys
