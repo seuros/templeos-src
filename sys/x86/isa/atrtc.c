@@ -59,6 +59,9 @@
 #include <machine/md_var.h>
 #endif
 
+/* PC/AT legacy RTC IRQ. */
+#define	ATRTC_IRQ	8
+
 /* tunable to detect a power loss of the rtc */
 static bool atrtc_power_lost = false;
 SYSCTL_BOOL(_machdep, OID_AUTO, atrtc_power_lost, CTLFLAG_RD, &atrtc_power_lost,
@@ -454,11 +457,28 @@ rtc_acpi_century_get(void)
 static int
 atrtc_probe(device_t dev)
 {
+	devclass_t dc;
+	device_t dev0;
 	int result;
 
 	if ((atrtc_enabled == -1 && atrtc_acpi_disabled()) ||
 	    (atrtc_enabled == 0))
 		return (ENXIO);
+
+	/*
+	 * Only one atrtc instance is supported. Prefer unit 0 if multiple
+	 * enumerations occur.
+	 */
+	dc = devclass_find("atrtc");
+	if (dc != NULL) {
+		dev0 = devclass_get_device(dc, 0);
+		if (dev0 != NULL && dev0 != dev) {
+			if (bootverbose)
+				device_printf(dev, "RTC already attached as %s\n",
+				    device_get_nameunit(dev0));
+			return (ENXIO);
+		}
+	}
 
 	result = ISA_PNP_PROBE(device_get_parent(dev), dev, atrtc_ids);
 	/* ENOENT means no PnP-ID, device is hinted. */
@@ -478,24 +498,29 @@ atrtc_attach(device_t dev)
 	int i;
 
 	sc = device_get_softc(dev);
+
 	sc->port_res = bus_alloc_resource(dev, SYS_RES_IOPORT, &sc->port_rid,
 	    IO_RTC, IO_RTC + 1, 2, RF_ACTIVE);
-	if (sc->port_res == NULL)
-		device_printf(dev, "Warning: Couldn't map I/O.\n");
+	if (sc->port_res == NULL && bootverbose)
+		device_printf(dev, "Could not map I/O ports 0x%x-0x%x "
+		    "(using direct access)\n", IO_RTC, IO_RTC + 1);
 	atrtc_start();
 	clock_register(dev, 1000000);
 	bzero(&sc->et, sizeof(struct eventtimer));
 	if (!atrtcclock_disable &&
-	    (resource_int_value(device_get_name(dev), device_get_unit(dev),
-	     "clock", &i) != 0 || i != 0)) {
+		    (resource_int_value(device_get_name(dev), device_get_unit(dev),
+		     "clock", &i) != 0 || i != 0)) {
 		sc->intr_rid = 0;
 		while (bus_get_resource(dev, SYS_RES_IRQ, sc->intr_rid,
-		    &s, NULL) == 0 && s != 8)
+		    &s, NULL) == 0 && s != ATRTC_IRQ)
 			sc->intr_rid++;
 		sc->intr_res = bus_alloc_resource(dev, SYS_RES_IRQ,
-		    &sc->intr_rid, 8, 8, 1, RF_ACTIVE);
+		    &sc->intr_rid, ATRTC_IRQ, ATRTC_IRQ, 1, RF_ACTIVE);
 		if (sc->intr_res == NULL) {
-			device_printf(dev, "Can't map interrupt.\n");
+			if (bootverbose)
+				device_printf(dev, "Could not allocate IRQ %d "
+				    "(event timer unavailable)\n", ATRTC_IRQ);
+			/* RTC still works for timekeeping without event timer */
 			return (0);
 		} else if ((bus_setup_intr(dev, sc->intr_res, INTR_TYPE_CLK,
 		    rtc_intr, NULL, sc, &sc->intr_handler))) {
