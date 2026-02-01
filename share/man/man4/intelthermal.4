@@ -1,0 +1,97 @@
+.\"-
+.\" SPDX-License-Identifier: BSD-2-Clause
+.\"
+.\" Copyright (c) 2026 Abdelkader Boudih <freebsd@seuros.com>
+.\"
+.Dd April 12, 2026
+.Dt INTELTHERMAL 4
+.Os
+.Sh NAME
+.Nm intelthermal
+.Nd Intel Processor Thermal Device driver
+.Sh SYNOPSIS
+To compile this driver into the kernel,
+place the following line in your
+kernel configuration file:
+.Bd -ragged -offset indent
+.Cd "device intelthermal"
+.Ed
+.Pp
+Alternatively, to load the driver as a
+module at boot time, place the following line in
+.Xr loader.conf 5 :
+.Bd -literal -offset indent
+intelthermal_load="YES"
+.Ed
+.Sh DESCRIPTION
+The
+.Nm
+driver provides read-only access to RAPL (Running Average Power Limit)
+registers on Intel Skylake and later processors via
+.Xr sysctl 8 .
+.Pp
+The driver attaches to the Processor Thermal Device (PCI device B0D4)
+and exposes long-term (PL1) and short-term (PL2) power limits as well
+as the Thermal Design Power (TDP).
+Power values are reported in milliwatts.
+.Pp
+The RAPL power unit is read from MSR 0x606 at attach time.
+If the MSR read fails, a default unit of 1/8\ W is used.
+.Pp
+If firmware has locked access to the MMIO registers, the driver
+detects this condition at attach time and reports it via the
+.Va access_denied
+sysctl.
+All power readings return zero when access is denied.
+.Sh HARDWARE
+The
+.Nm
+driver supports the following device:
+.Pp
+.Bl -bullet -compact
+.It
+Intel Skylake Processor Thermal Device (PCI ID 0x8086:0x1903)
+.El
+.Pp
+Other Intel processor generations may use different MMIO register
+layouts and are not currently supported.
+.Sh SYSCTLS
+The following
+.Xr sysctl 8
+variables are available:
+.Bl -tag -width indent
+.It Va dev.intelthermal.%d.access_denied
+Set to 1 if firmware has denied access to RAPL registers.
+.It Va dev.intelthermal.%d.pl1
+Long-term (PL1) power limit in milliwatts.
+.It Va dev.intelthermal.%d.pl2
+Short-term (PL2) power limit in milliwatts.
+.It Va dev.intelthermal.%d.pl1_enabled
+Set to 1 if the PL1 power limit is enabled.
+.It Va dev.intelthermal.%d.pl2_enabled
+Set to 1 if the PL2 power limit is enabled.
+.It Va dev.intelthermal.%d.locked
+Set to 1 if power limits are locked by firmware.
+.It Va dev.intelthermal.%d.tdp
+Thermal Design Power in milliwatts.
+.It Va dev.intelthermal.%d.power_unit_div
+Power unit divisor derived from MSR 0x606.
+.It Va dev.intelthermal.%d.power_unit_shift
+Power unit shift (bits 3:0 of MSR 0x606).
+.El
+.Sh SEE ALSO
+.Xr pci 4 ,
+.Xr sysctl 8
+.Pp
+Intel 10th Gen Core Processor Datasheet, Volume 2.
+.Sh HISTORY
+The
+.Nm
+driver first appeared in
+.Fx 16.0 .
+.Sh AUTHORS
+.An Abdelkader Boudih Aq Mt freebsd@seuros.com
+.Sh CAVEATS
+Only Skylake Processor Thermal Device (0x1903) is supported.
+Other processor generations have different register layouts and
+require per-generation validation.
