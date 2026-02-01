@@ -175,6 +175,7 @@ SUBDIR=	\
 	imgact_binmisc \
 	${_imx} \
 	${_intelspi} \
+	${_intel_proc_thermal} \
 	${_io} \
 	${_ioat} \
         ${_ipoib} \
@@ -817,6 +818,7 @@ _ichwd=		ichwd
 _ida=		ida
 _intelspi=	intelspi
 _intel_pmc_core=	intel_pmc_core
+_intel_proc_thermal=	intel_proc_thermal
 _ips=		ips
 _isci=		isci
 _ipw=		ipw
