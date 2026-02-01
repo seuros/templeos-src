@@ -313,6 +313,7 @@ SUBDIR=	\
 	${_padlock} \
 	${_padlock_rng} \
 	${_pchtherm} \
+	${_intel_pmc_core} \
 	${_pcfclock} \
 	${_pf} \
 	${_pflog} \
@@ -815,6 +816,7 @@ _hyperv=	hyperv
 _ichwd=		ichwd
 _ida=		ida
 _intelspi=	intelspi
+_intel_pmc_core=	intel_pmc_core
 _ips=		ips
 _isci=		isci
 _ipw=		ipw
