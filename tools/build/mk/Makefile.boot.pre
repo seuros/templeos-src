@@ -1,5 +1,5 @@
 # Various MK_* options need to be set before including bsd.prog.mk/bsd.lib.mk
-.if ${.MAKE.OS} != "FreeBSD"
+.if ${.MAKE.OS} != ${OSNAME}
 # Most Linux distributions don't ship the .a files for static linking.
 # And on macOS it is impossible to create a statically linked binary.
 NO_SHARED:=	no

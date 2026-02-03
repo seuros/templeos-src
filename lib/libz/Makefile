@@ -38,7 +38,7 @@ SRCS+=		zutil.c
 
 # Wrapper relies on FreeBSD-specific fpos_t representation and non-portable
 # funopen. Not needed for bootstrapping, so just disable it.
-.if ${.MAKE.OS} == "FreeBSD" || !defined(BOOTSTRAPPING)
+.if ${.MAKE.OS} == ${OSNAME} || !defined(BOOTSTRAPPING)
 SRCS+=		zopen.c
 .endif
 

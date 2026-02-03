@@ -1,6 +1,7 @@
 
 unix		?=	We run FreeBSD, not UNIX.
 .FreeBSD	?=	true
+OSNAME		?=	FreeBSD
 
 .if !defined(%POSIX)
 #

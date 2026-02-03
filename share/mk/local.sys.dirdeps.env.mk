@@ -61,7 +61,7 @@ PYTHON ?= /usr/local/bin/python
 .endif
 .endif
 
-.if ${.MAKE.OS} != "FreeBSD" || ${_HOST_OSREL:R} < ${OS_REVISION:R}
+.if ${.MAKE.OS} != ${OSNAME} || ${_HOST_OSREL:R} < ${OS_REVISION:R}
 # a pseudo option to indicate we need libegacy for host
 MK_host_egacy= yes
 .endif

@@ -196,7 +196,7 @@ _GCC_BROKEN=boot code linker script issues.
 .endif
 .endif
 
-.if ${.MAKE.OS} != "FreeBSD"
+.if ${.MAKE.OS} != ${OSNAME}
 CROSSBUILD_HOST=${.MAKE.OS} # Unset for native FreeBSD builds
 .if ${.MAKE.OS} != "Linux" && ${.MAKE.OS} != "Darwin"
 .warning Unsupported crossbuild system: ${.MAKE.OS}. Build will probably fail!
@@ -620,7 +620,7 @@ BUILD_ARCH!=	uname -p
 # On some Linux systems uname -p returns "unknown" so skip this check there.
 # This check only exists to tell people to use TARGET_ARCH instead of
 # MACHINE_ARCH so skipping it when crossbuilding on non-FreeBSD should be fine.
-.if ${MACHINE_ARCH} != ${BUILD_ARCH} && ${.MAKE.OS} == "FreeBSD"
+.if ${MACHINE_ARCH} != ${BUILD_ARCH} && ${.MAKE.OS} == ${OSNAME}
 .error To cross-build, set TARGET_ARCH.
 .endif
 .endif
@@ -672,7 +672,7 @@ MKTEMP=mktemp
 .endif
 INSTALLTMP!=	${MKTEMP} -d -u -t install
 
-.if ${.MAKE.OS} == "FreeBSD"
+.if ${.MAKE.OS} == ${OSNAME}
 # When building on FreeBSD we always copy the host tools instead of linking
 # into INSTALLTMP to avoid issues with incompatible libraries (see r364030).
 # Note: we could create links if we don't intend to update the current machine.
@@ -2824,7 +2824,7 @@ _basic_bootstrap_tools+=usr.sbin/tzsetup
 # OpenSSL, like macOS, or when building on releases with OpenSSL 1.x.
 .if ${MK_CAROOT} != "no" && ${MK_OPENSSL} != "no"
 .if ${.MAKE.OS} == "Darwin" || \
-    (${.MAKE.OS} == "FreeBSD" && ${BOOTSTRAPPING} < 1400000)
+    (${.MAKE.OS} == ${OSNAME} && ${BOOTSTRAPPING} < 1400000)
 _bootstrap_libcrypto=secure/lib/libcrypto
 ${_bt}-usr.sbin/certctl: ${_bt}-secure/lib/libcrypto
 .endif

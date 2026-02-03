@@ -241,7 +241,7 @@ META_TGT_WHITELIST+=	build${libcompat}
 # Only sanitize PATH on FreeBSD.
 # PATH may include tools that are required to cross-build
 # on non-FreeBSD systems.
-.if ${.MAKE.OS} == "FreeBSD"
+.if ${.MAKE.OS} == ${OSNAME}
 PATH=	/sbin:/bin:/usr/sbin:/usr/bin
 .endif
 MAKEOBJDIRPREFIX?=	/usr/obj
@@ -580,7 +580,7 @@ MAKE_PARAMS_${arch}?=	CROSS_TOOLCHAIN=${TOOLCHAIN_${arch}}
 UNIVERSE_TARGET?=	buildworld
 KERNSRCDIR?=		${.CURDIR}/sys
 
-.if ${.MAKE.OS} == "FreeBSD"
+.if ${.MAKE.OS} == ${OSNAME}
 UNIVERSE_TOOLCHAIN_TARGET?=		${MACHINE}
 UNIVERSE_TOOLCHAIN_TARGET_ARCH?=	${MACHINE_ARCH}
 .else
