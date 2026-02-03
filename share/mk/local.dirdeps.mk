@@ -33,7 +33,7 @@ DIRDEPS_FILTER.host = \
 	Nsecure/lib* \
 	Nusr.bin/xinstall* \
 
-.if ${.MAKE.OS} == "FreeBSD"
+.if ${.MAKE.OS} == ${OSNAME}
 # Host libraries should mostly be excluded from the build so the
 # host version in /usr/lib is used.
 # Internal libraries need to be allowed to be built though

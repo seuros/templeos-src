@@ -2,7 +2,7 @@
 # distrib-dirs can be done in STAGE_OBJTOP
 all:
 
-.if ${.MAKE.OS} == "FreeBSD"
+.if ${.MAKE.OS} == ${OSNAME}
 # mtree makes a lot of noise if we are not root, 
 # we don't need to see it.
 stage-distrib-dirs: .META ${META_DEPS}

@@ -82,7 +82,7 @@ PKG_ABI_FILE=	${WSTAGEDIR}/usr/bin/uname
 PKG_ABI=	$$(${PKG_CMD} -o ABI_FILE=${PKG_ABI_FILE} config ABI)
 .endif
 
-.if ${.MAKE.OS} == "FreeBSD"
+.if ${.MAKE.OS} == ${OSNAME}
 # For installing packages into the release media.
 PKG_ENV+=	INSTALL_AS_USER=yes
 PKG_ENV+=	ASSUME_ALWAYS_YES=yes
@@ -265,7 +265,7 @@ disc1:
 	done
 .endif
 .endif
-.if ${.MAKE.OS} == "FreeBSD" && (!defined(NOPKG) || empty(NOPKG))
+.if ${.MAKE.OS} == ${OSNAME} && (!defined(NOPKG) || empty(NOPKG))
 # Install packages onto release media.
 .if !defined(NOPKGBASE) || empty(NOPKGBASE)
 	${PKGBASE_INSTALL} pkg
@@ -310,7 +310,7 @@ bootonly:
 	echo "./usr/freebsd-dist type=dir uname=root gname=wheel mode=0755" >> ${.TARGET}/METALOG
 	echo "./usr/freebsd-dist/MANIFEST type=file uname=root gname=wheel mode=0644" >> ${.TARGET}/METALOG
 .endif
-.if ${.MAKE.OS} == "FreeBSD" && (!defined(NOPKG) || empty(NOPKG))
+.if ${.MAKE.OS} == ${OSNAME} && (!defined(NOPKG) || empty(NOPKG))
 .if !defined(NOPKGBASE) || empty(NOPKGBASE)
 	${PKGBASE_INSTALL} pkg
 	${PKGBASE_CLEAN}
@@ -367,7 +367,7 @@ dvd:
 	    echo "./usr/freebsd-dist/$${dist} type=file uname=root gname=wheel mode=0644" >> ${.TARGET}/METALOG; \
 	done
 .endif
-.if ${.MAKE.OS} == "FreeBSD" && (!defined(NOPKG) || empty(NOPKG))
+.if ${.MAKE.OS} == ${OSNAME} && (!defined(NOPKG) || empty(NOPKG))
 # Install packages onto release media.
 .if !defined(NOPKGBASE) || empty(NOPKGBASE)
 	${PKGBASE_INSTALL} pkg

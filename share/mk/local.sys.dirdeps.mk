@@ -144,7 +144,7 @@ $V?= ${${V:S,DEP_,,}}
 .endfor
 .endif
 
-.if ${MACHINE:Nhost*} == "" && ${.MAKE.OS} != "FreeBSD"
+.if ${MACHINE:Nhost*} == "" && ${.MAKE.OS} != ${OSNAME}
 # some makefiles expect this
 BOOTSTRAPPING= 0
 .endif

@@ -114,7 +114,7 @@ LDFLAGS+=	-Wl,--gc-sections
 # get_brandinfo finds nothing and (f)execve fails with ENOEXEC. Work around
 # this by manually setting the OS/ABI field via the emulation.
 .if ${MACHINE_ARCH:Mriscv64*} != "" && ${NO_SHARED:Uno:tl} != "no" && \
-    (${.MAKE.OS} == "FreeBSD" || !defined(BOOTSTRAPPING))
+    (${.MAKE.OS} == ${OSNAME} || !defined(BOOTSTRAPPING))
 LDFLAGS+=	-Wl,-m,elf64lriscv_fbsd
 .endif
 .endif
@@ -123,7 +123,7 @@ CXXSTD=		c++17
 CXXFLAGS+=	-fno-exceptions
 CXXFLAGS+=	-fno-rtti
 CXXFLAGS+=	-fvisibility-inlines-hidden
-.if ${.MAKE.OS} == "FreeBSD" || !defined(BOOTSTRAPPING)
+.if ${.MAKE.OS} == ${OSNAME} || !defined(BOOTSTRAPPING)
 CXXFLAGS.clang+= -stdlib=libc++
 .else
 # Building on macOS/Linux needs the real sysctl() not the bootstrap tools stub.
