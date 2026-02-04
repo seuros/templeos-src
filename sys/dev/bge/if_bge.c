@@ -6236,19 +6236,19 @@ bge_add_sysctls(struct bge_softc *sc)
 
 #ifdef BGE_REGISTER_DEBUG
 	SYSCTL_ADD_PROC(ctx, children, OID_AUTO, "debug_info",
-	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_NEEDGIANT, sc, 0,
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_MPSAFE, sc, 0,
 	    bge_sysctl_debug_info, "I", "Debug Information");
 
 	SYSCTL_ADD_PROC(ctx, children, OID_AUTO, "reg_read",
-	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_NEEDGIANT, sc, 0,
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_MPSAFE, sc, 0,
 	    bge_sysctl_reg_read, "I", "MAC Register Read");
 
 	SYSCTL_ADD_PROC(ctx, children, OID_AUTO, "ape_read",
-	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_NEEDGIANT, sc, 0,
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_MPSAFE, sc, 0,
 	    bge_sysctl_ape_read, "I", "APE Register Read");
 
 	SYSCTL_ADD_PROC(ctx, children, OID_AUTO, "mem_read",
-	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_NEEDGIANT, sc, 0,
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_MPSAFE, sc, 0,
 	    bge_sysctl_mem_read, "I", "Memory Read");
 
 #endif
@@ -6299,7 +6299,7 @@ bge_add_sysctls(struct bge_softc *sc)
 
 #define BGE_SYSCTL_STAT(sc, ctx, desc, parent, node, oid) \
     SYSCTL_ADD_PROC(ctx, parent, OID_AUTO, oid, \
-        CTLTYPE_UINT | CTLFLAG_RD | CTLFLAG_NEEDGIANT, sc, \
+        CTLTYPE_UINT | CTLFLAG_RD | CTLFLAG_MPSAFE, sc, \
 	offsetof(struct bge_stats, node), bge_sysctl_stats, "IU", desc)
 
 static void
