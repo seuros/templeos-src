@@ -147,6 +147,7 @@ struct nhi_softc {
 #define NHI_TYPE_ICL		0x03		/* IceLake */
 #define NHI_TYPE_MR		0x04		/* Maple Ridge */
 #define NHI_TYPE_ADL		0x05		/* AlderLake */
+#define NHI_TYPE_LEGACY		0x06		/* TB1/TB2 */
 #define NHI_TYPE_USB4		0x0f
 #define NHI_TYPE_MASK		0x0f
 #define NHI_MBOX_BUSY		0x10
@@ -213,6 +214,7 @@ struct nhi_dispatch {
 #define NHI_IS_TR(sc)	(((sc)->hwflags & NHI_TYPE_MASK) == NHI_TYPE_TR)
 #define NHI_IS_ICL(sc)	(((sc)->hwflags & NHI_TYPE_MASK) == NHI_TYPE_ICL)
 #define NHI_IS_USB4(sc)	(((sc)->hwflags & NHI_TYPE_MASK) == NHI_TYPE_USB4)
+#define NHI_IS_LEGACY(sc) (((sc)->hwflags & NHI_TYPE_MASK) == NHI_TYPE_LEGACY)
 
 int nhi_pci_configure_interrupts(struct nhi_softc *sc);
 void nhi_pci_enable_interrupt(struct nhi_ring_pair *r);

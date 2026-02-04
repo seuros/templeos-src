@@ -43,6 +43,10 @@
 
 /* PCI Vendor and Device ID's */
 #define	VENDOR_INTEL		0x8086
+#define DEVICE_LR_NHI		0x1513	/* Light Ridge (TB1) */
+#define DEVICE_CR_4C_NHI	0x1547	/* Cactus Ridge 4C (TB1 gen2) */
+#define DEVICE_FR_2C_NHI	0x156a	/* Falcon Ridge 2C (TB2) */
+#define DEVICE_FR_4C_NHI	0x156c	/* Falcon Ridge 4C (TB2) */
 #define DEVICE_AR_2C_NHI	0x1575
 #define DEVICE_AR_DP_B_NHI	0x1577
 #define	DEVICE_AR_DP_C_NHI	0x15d2

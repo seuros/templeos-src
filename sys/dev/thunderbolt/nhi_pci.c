@@ -94,26 +94,50 @@ struct nhi_ident {
 	uint16_t	device;
 	uint16_t	subvendor;
 	uint16_t	subdevice;
+	uint8_t		class;
+	uint8_t		subclass;
 	uint32_t	flags;
 	const char	*desc;
 } nhi_identifiers[] = {
-	{ VENDOR_INTEL, DEVICE_AR_2C_NHI, 0xffff, 0xffff, NHI_TYPE_AR,
+#define NHI_ANY_CLASS	0xff
+	{ VENDOR_INTEL, DEVICE_LR_NHI, 0x2222, 0x1111,
+	    PCIC_BASEPERIPH, PCIS_BASEPERIPH_OTHER, NHI_TYPE_LEGACY,
+	    "Thunderbolt 1 NHI (Light Ridge)" },
+	{ VENDOR_INTEL, DEVICE_CR_4C_NHI, 0x2222, 0x1111,
+	    PCIC_BASEPERIPH, PCIS_BASEPERIPH_OTHER, NHI_TYPE_LEGACY,
+	    "Thunderbolt 1 NHI (Cactus Ridge 4C)" },
+	{ VENDOR_INTEL, DEVICE_FR_2C_NHI, 0xffff, 0xffff,
+	    NHI_ANY_CLASS, NHI_ANY_CLASS, NHI_TYPE_LEGACY,
+	    "Thunderbolt 2 NHI (Falcon Ridge 2C)" },
+	{ VENDOR_INTEL, DEVICE_FR_4C_NHI, 0xffff, 0xffff,
+	    NHI_ANY_CLASS, NHI_ANY_CLASS, NHI_TYPE_LEGACY,
+	    "Thunderbolt 2 NHI (Falcon Ridge 4C)" },
+	{ VENDOR_INTEL, DEVICE_AR_2C_NHI, 0xffff, 0xffff,
+	    NHI_ANY_CLASS, NHI_ANY_CLASS, NHI_TYPE_AR,
 	    "Thunderbolt 3 NHI (Alpine Ridge 2C)" },
-	{ VENDOR_INTEL, DEVICE_AR_DP_B_NHI, 0xffff, 0xffff, NHI_TYPE_AR,
+	{ VENDOR_INTEL, DEVICE_AR_DP_B_NHI, 0xffff, 0xffff,
+	    NHI_ANY_CLASS, NHI_ANY_CLASS, NHI_TYPE_AR,
 	    "Thunderbolt 3 NHI (Alpine Ridge 4C Rev B)" },
-	{ VENDOR_INTEL, DEVICE_AR_DP_C_NHI, 0xffff, 0xffff, NHI_TYPE_AR,
+	{ VENDOR_INTEL, DEVICE_AR_DP_C_NHI, 0xffff, 0xffff,
+	    NHI_ANY_CLASS, NHI_ANY_CLASS, NHI_TYPE_AR,
 	    "Thunderbolt 3 NHI (Alpine Ridge 4C Rev C)" },
-	{ VENDOR_INTEL, DEVICE_AR_LP_NHI, 0xffff, 0xffff, NHI_TYPE_AR,
+	{ VENDOR_INTEL, DEVICE_AR_LP_NHI, 0xffff, 0xffff,
+	    NHI_ANY_CLASS, NHI_ANY_CLASS, NHI_TYPE_AR,
 	    "Thunderbolt 3 NHI (Alpine Ridge LP 2C)" },
-	{ VENDOR_INTEL, DEVICE_ICL_NHI_0, 0xffff, 0xffff, NHI_TYPE_ICL,
+	{ VENDOR_INTEL, DEVICE_ICL_NHI_0, 0xffff, 0xffff,
+	    NHI_ANY_CLASS, NHI_ANY_CLASS, NHI_TYPE_ICL,
 	    "Thunderbolt 3 NHI Port 0 (IceLake)" },
-	{ VENDOR_INTEL, DEVICE_ICL_NHI_1, 0xffff, 0xffff, NHI_TYPE_ICL,
+	{ VENDOR_INTEL, DEVICE_ICL_NHI_1, 0xffff, 0xffff,
+	    NHI_ANY_CLASS, NHI_ANY_CLASS, NHI_TYPE_ICL,
 	    "Thunderbolt 3 NHI Port 1 (IceLake)" },
-	{ VENDOR_AMD, DEVICE_PINK_SARDINE_0, 0xffff, 0xffff, NHI_TYPE_USB4,
+	{ VENDOR_AMD, DEVICE_PINK_SARDINE_0, 0xffff, 0xffff,
+	    NHI_ANY_CLASS, NHI_ANY_CLASS, NHI_TYPE_USB4,
 	    "USB4 NHI Port 0 (Pink Sardine)" },
-	{ VENDOR_AMD, DEVICE_PINK_SARDINE_1, 0xffff, 0xffff, NHI_TYPE_USB4,
+	{ VENDOR_AMD, DEVICE_PINK_SARDINE_1, 0xffff, 0xffff,
+	    NHI_ANY_CLASS, NHI_ANY_CLASS, NHI_TYPE_USB4,
 	    "USB4 NHI Port 1 (Pink Sardine)" },
-	{ 0, 0, 0, 0, 0, NULL }
+#undef NHI_ANY_CLASS
+	{ 0, 0, 0, 0, 0, 0, 0, NULL }
 };
 
 DRIVER_MODULE_ORDERED(nhi, pci, nhi_pci_driver, NULL, NULL,
@@ -128,6 +152,12 @@ nhi_find_ident(device_t dev)
 		if (n->vendor != pci_get_vendor(dev))
 			continue;
 		if (n->device != pci_get_device(dev))
+			continue;
+		if ((n->class != 0xff) &&
+		    (n->class != pci_get_class(dev)))
+			continue;
+		if ((n->subclass != 0xff) &&
+		    (n->subclass != pci_get_subclass(dev)))
 			continue;
 		if ((n->subvendor != 0xffff) &&
 		    (n->subvendor != pci_get_subvendor(dev)))
