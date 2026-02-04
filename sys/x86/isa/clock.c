@@ -163,8 +163,11 @@ timer_spkr_acquire(void)
 
 	mode = TIMER_SEL2 | TIMER_SQWAVE | TIMER_16BIT;
 
-	if (timer2_state != RELEASED)
+	mtx_lock_spin(&clock_lock);
+	if (timer2_state != RELEASED) {
+		mtx_unlock_spin(&clock_lock);
 		return (-1);
+	}
 	timer2_state = ACQUIRED;
 
 	/*
@@ -175,6 +178,7 @@ timer_spkr_acquire(void)
 	 * careful with it as with timer0.
 	 */
 	outb(TIMER_MODE, TIMER_SEL2 | (mode & 0x3f));
+	mtx_unlock_spin(&clock_lock);
 
 	ppi_spkr_on();		/* enable counter2 output to speaker */
 	return (0);
@@ -184,10 +188,14 @@ int
 timer_spkr_release(void)
 {
 
-	if (timer2_state != ACQUIRED)
+	mtx_lock_spin(&clock_lock);
+	if (timer2_state != ACQUIRED) {
+		mtx_unlock_spin(&clock_lock);
 		return (-1);
+	}
 	timer2_state = RELEASED;
 	outb(TIMER_MODE, TIMER_SEL2 | TIMER_SQWAVE | TIMER_16BIT);
+	mtx_unlock_spin(&clock_lock);
 
 	ppi_spkr_off();		/* disable counter2 output to speaker */
 	return (0);
