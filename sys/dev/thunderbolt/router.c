@@ -73,6 +73,9 @@ static int router_schedule_locked(struct router_softc *,
 static nhi_ring_cb_t router_complete_intr;
 static nhi_ring_cb_t router_response_intr;
 static nhi_ring_cb_t router_notify_intr;
+static void router_hotplug_ack(struct router_softc *, tb_route_t);
+static void router_notify_ack_complete(void *, union nhi_ring_desc *,
+    struct nhi_cmd_frame *);
 
 #define CFG_DEFAULT_RETRIES	3
 #define CFG_DEFAULT_TIMEOUT	2
@@ -202,6 +205,8 @@ router_hotplug_intr(void *context, union nhi_ring_desc *ring,
 	adap = hp.adapter_attrs & TB_CFG_ADPT_MASK;
 	unplug = hp.adapter_attrs & TB_CFG_UPG_UNPLUG;
 
+	router_hotplug_ack(sc, hp.route);
+
 	tb_printf(sc, "Hotplug %s on adapter %d, route 0x%08x%08x\n",
 	    unplug ? "UNPLUG" : "PLUG", adap, hp.route.hi, hp.route.lo);
 
@@ -209,11 +214,67 @@ router_hotplug_intr(void *context, union nhi_ring_desc *ring,
 		hcm_router_discover(sc->nsc->hcm);
 }
 
+static void
+router_hotplug_ack(struct router_softc *sc, tb_route_t route)
+{
+	struct router_command *cmd;
+	struct tb_cfg_notify_ack *ack;
+	int error;
+	int msglen;
+	uint32_t *msg;
+
+	error = router_alloc_cmd(sc, &cmd);
+	if (error != 0) {
+		tb_debug(sc, DBG_ROUTER, "Cannot allocate command: %d\n",
+		    error);
+		return;
+	}
+
+	ack = router_get_frame_data(cmd);
+	bzero(ack, sizeof(*ack));
+	ack->route.hi = htobe32(route.hi);
+	ack->route.lo = htobe32(route.lo);
+
+	msglen = (sizeof(*ack) - 4) / 4;
+	msg = (uint32_t *)cmd->nhicmd->data;
+	msg[msglen] = htobe32(tb_calc_crc(cmd->nhicmd->data, msglen * 4));
+
+	cmd->nhicmd->pdf = PDF_NOTIFY_ACK;
+	cmd->nhicmd->req_len = sizeof(*ack);
+	cmd->nhicmd->timeout = NHI_CMD_TIMEOUT;
+	cmd->nhicmd->retries = 0;
+	cmd->nhicmd->resp_buffer = NULL;
+	cmd->nhicmd->resp_len = 0;
+	cmd->nhicmd->context = cmd;
+
+	error = nhi_tx_schedule(sc->ring0, cmd->nhicmd);
+	if (error != 0) {
+		tb_debug(sc, DBG_ROUTER, "nhi_tx_schedule failed: %d\n",
+		    error);
+		router_free_cmd(sc, cmd);
+	}
+}
+
+static void
+router_notify_ack_complete(void *context, union nhi_ring_desc *ring,
+    struct nhi_cmd_frame *nhicmd)
+{
+	struct router_command *cmd;
+
+	cmd = (struct router_command *)(nhicmd->context);
+	if (cmd == NULL)
+		return;
+
+	router_free_cmd(cmd->sc, cmd);
+}
+
 static int
 router_register_interrupts(struct router_softc *sc)
 {
 	struct nhi_dispatch tx[] = { { PDF_READ, router_complete_intr, sc },
 				     { PDF_WRITE, router_complete_intr, sc },
+				     { PDF_NOTIFY_ACK,
+				       router_notify_ack_complete, sc },
 				     { 0, NULL, NULL } };
 	struct nhi_dispatch rx[] = { { PDF_READ, router_response_intr, sc },
 				     { PDF_WRITE, router_response_intr, sc },
@@ -247,11 +308,22 @@ tb_router_attach(struct router_softc *parent, tb_route_t route)
 	mtx_init(&sc->mtx, "tbcfg", "Thunderbolt Router Config", MTX_DEF);
 	TAILQ_INIT(&sc->cmd_queue);
 
-	router_insert(sc, parent);
-
 	error = _tb_router_attach(sc);
-	if (error == 0)
-		tbdev_add_router(sc);
+	if (error != 0) {
+		mtx_destroy(&sc->mtx);
+		free(sc, M_THUNDERBOLT);
+		return (error);
+	}
+
+	error = router_insert(sc, parent);
+	if (error != 0) {
+		tb_debug(parent, DBG_ROUTER, "router_insert failed: %d\n",
+		    error);
+		tb_router_detach(sc);
+		return (error);
+	}
+
+	tbdev_add_router(sc);
 
 	return (error);
 }
@@ -830,7 +902,7 @@ tb_config_next_cap(struct router_softc *sc, struct router_cfg_cap *cap)
 		return (0);
 	}
 
-	tb_config_read(sc, cap->space, cap->adap, current, 2, buf);
+	error = tb_config_read(sc, cap->space, cap->adap, current, 2, buf);
 	if (error) {
 		free(buf, M_THUNDERBOLT);
 		return (error);

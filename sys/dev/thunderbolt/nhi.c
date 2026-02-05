@@ -75,6 +75,10 @@ static int nhi_init(struct nhi_softc *);
 static void nhi_post_init(void *);
 static int nhi_tx_enqueue(struct nhi_ring_pair *, struct nhi_cmd_frame *);
 static int nhi_setup_sysctl(struct nhi_softc *);
+static int nhi_set_legacy_cm_mode(struct nhi_softc *);
+static int nhi_valid_mbox_connmode(uint32_t);
+static int nhi_wait_fw_cm_ready(struct nhi_softc *);
+static int nhi_wait_outmail_ready(struct nhi_softc *, uint32_t *);
 
 SYSCTL_NODE(_hw, OID_AUTO, nhi, CTLFLAG_RD, 0, "NHI Driver Parameters");
 
@@ -88,6 +92,14 @@ MALLOC_DEFINE(M_NHI, "nhi", "nhi driver memory");
 #ifndef NHI_FORCE_HCM
 #define NHI_FORCE_HCM 0
 #endif
+/*
+ * Default legacy connection manager mode is Certified/Any Depth.
+ * Relax to ANY_* only if you must allow uncertified devices.
+ */
+#ifndef NHI_MBOX_CONNMODE
+#define NHI_MBOX_CONNMODE INMAILCMD_SETMODE_CERT_TB_ANY_DEPTH
+#endif
+#define NHI_FW_CM_READY_TIMEOUT_SEC 5
 
 void
 nhi_get_tunables(struct nhi_softc *sc)
@@ -101,6 +113,7 @@ nhi_get_tunables(struct nhi_softc *sc)
 	sc->debug = NHI_DEBUG_LEVEL;
 	sc->max_ring_count = NHI_DEFAULT_NUM_RINGS;
 	sc->force_hcm = NHI_FORCE_HCM;
+	sc->mbox_connmode = NHI_MBOX_CONNMODE;
 
 	/* Inherit setting from the upstream thunderbolt switch node */
 	val = TB_GET_DEBUG(sc->dev, &sc->debug);
@@ -130,6 +143,8 @@ nhi_get_tunables(struct nhi_softc *sc)
 	}
 	if (TUNABLE_INT_FETCH("hw.nhi.force_hcm", &val) != 0)
 		sc->force_hcm = val;
+	if (TUNABLE_INT_FETCH("hw.nhi.connmode", &val) != 0)
+		sc->mbox_connmode = val;
 
 	/* Grab instance variables */
 	bzero(oid, 80);
@@ -143,10 +158,14 @@ nhi_get_tunables(struct nhi_softc *sc)
 		val = min(val, NHI_MAX_NUM_RINGS);
 		sc->max_ring_count = max(val, 1);
 	}
-	snprintf(tmpstr, sizeof(tmpstr), "dev, nhi.%d.force_hcm",
+	snprintf(tmpstr, sizeof(tmpstr), "dev.nhi.%d.force_hcm",
 	    device_get_unit(sc->dev));
 	if (TUNABLE_INT_FETCH(tmpstr, &val) != 0)
 		sc->force_hcm = val;
+	snprintf(tmpstr, sizeof(tmpstr), "dev.nhi.%d.connmode",
+	    device_get_unit(sc->dev));
+	if (TUNABLE_INT_FETCH(tmpstr, &val) != 0)
+		sc->mbox_connmode = val;
 
 	return;
 }
@@ -209,10 +228,23 @@ nhi_inmail_cmd(struct nhi_softc *sc, uint32_t cmd, uint32_t data)
 	if (val & INMAILCMD_ERROR)
 		tb_debug(sc, DBG_MBOX, "Error already set in INMAILCMD\n");
 	if (val & INMAILCMD_OPREQ) {
-		mtx_unlock(&sc->nhi_mtx);
 		tb_debug(sc, DBG_MBOX,
 		    "INMAILCMD request already in progress\n");
-		return (EBUSY);
+		timeout = NHI_MAILBOX_TIMEOUT;
+		while (timeout--) {
+			DELAY(1000);
+			val = nhi_read_reg(sc, TBT_INMAILCMD);
+			tb_debug(sc, DBG_MBOX|DBG_FULL,
+			    "Polling INMAILCMD= 0x%08x\n", val);
+			if ((val & INMAILCMD_OPREQ) == 0)
+				break;
+		}
+		if (val & INMAILCMD_OPREQ) {
+			tb_printf(sc, "Timeout waiting for mailbox\n");
+			sc->hwflags &= ~NHI_MBOX_BUSY;
+			mtx_unlock(&sc->nhi_mtx);
+			return (ETIMEDOUT);
+		}
 	}
 
 	nhi_write_reg(sc, TBT_INMAILDATA, data);
@@ -308,8 +340,7 @@ nhi_attach(struct nhi_softc *sc)
 	if ((error == 0) && (NHI_USE_ICM(sc)))
 		tb_printf(sc, "WARN: device uses an internal connection manager\n");
 	if ((error == 0) && (NHI_USE_HCM(sc)))
-		;
-	error = hcm_attach(sc);
+		error = hcm_attach(sc);
 
 	if (error == 0)
 		error = nhi_init(sc);
@@ -773,6 +804,13 @@ nhi_post_init(void *arg)
 	    u[15], u[14], u[13], u[12], u[11], u[10], u[9], u[8], u[7],
 	    u[6], u[5], u[4], u[3], u[2], u[1], u[0]);
 
+	if (NHI_IS_LEGACY(sc)) {
+		error = nhi_set_legacy_cm_mode(sc);
+		if (error != 0)
+			tb_printf(sc, "Failed to set legacy CM mode: %d\n",
+			    error);
+	}
+
 	(void)tbdev_add_domain(sc->uuid);
 
 	/* Trigger HCM device discovery */
@@ -1181,6 +1219,99 @@ nhi_setup_sysctl(struct nhi_softc *sc)
 	SYSCTL_ADD_U8(ctx, SYSCTL_CHILDREN(tree), OID_AUTO,
 	    "force_hcm", CTLFLAG_RD, &sc->force_hcm, 0,
 	    "Force on/off the function of the host connection manager");
+	SYSCTL_ADD_U8(ctx, SYSCTL_CHILDREN(tree), OID_AUTO,
+	    "connmode", CTLFLAG_RD, &sc->mbox_connmode, 0,
+	    "Legacy CM mode (set via hw.nhi.connmode or dev.nhi.N.connmode)");
+
+	return (0);
+}
+
+static int
+nhi_valid_mbox_connmode(uint32_t mode)
+{
+
+	switch (mode) {
+	case INMAILCMD_SETMODE_CERT_TB_1ST_DEPTH:
+	case INMAILCMD_SETMODE_ANY_TB_1ST_DEPTH:
+	case INMAILCMD_SETMODE_CERT_TB_ANY_DEPTH:
+	case INMAILCMD_SETMODE_ANY_TB_ANY_DEPTH:
+		return (1);
+	default:
+		return (0);
+	}
+}
+
+static int
+nhi_set_legacy_cm_mode(struct nhi_softc *sc)
+{
+	uint32_t mode;
+	uint32_t out;
+	int error;
+
+	mode = sc->mbox_connmode;
+	if (!nhi_valid_mbox_connmode(mode)) {
+		tb_printf(sc, "Invalid legacy CM mode 0x%x, using default\n",
+		    mode);
+		mode = NHI_MBOX_CONNMODE;
+		sc->mbox_connmode = mode;
+	}
+
+	error = nhi_wait_fw_cm_ready(sc);
+	if (error != 0)
+		return (error);
+
+	error = nhi_wait_outmail_ready(sc, &out);
+	if (error != 0)
+		return (error);
+
+	tb_printf(sc, "Outmailcmd: 0x%08x (%s)%s\n", out,
+	    tb_get_string(out & OUTMAILCMD_OPMODE_MASK,
+	    nhi_outmailcmd_opmode),
+	    (out & OUTMAILCMD_STATUS_BUSY) ? " BUSY" : "");
+
+	tb_printf(sc, "Legacy CM mode: %s\n",
+	    tb_get_string(mode, tb_mbox_connmode));
+	return (nhi_inmail_cmd(sc, mode, 0));
+}
+
+static int
+nhi_wait_fw_cm_ready(struct nhi_softc *sc)
+{
+	uint32_t val;
+	int i;
+
+	for (i = 0; i < NHI_FW_CM_READY_TIMEOUT_SEC * 10; i++) {
+		val = nhi_read_reg(sc, TBT_FW_STATUS);
+		if (val & FWSTATUS_CM_READY)
+			return (0);
+		pause("tbtfw", hz / 10);
+	}
+
+	tb_printf(sc, "FW CM not ready, FW_STATUS=0x%08x\n", val);
+	return (ETIMEDOUT);
+}
+
+static int
+nhi_wait_outmail_ready(struct nhi_softc *sc, uint32_t *outp)
+{
+	uint32_t out;
+	int i;
+
+	out = 0;
+	for (i = 0; i < NHI_FW_CM_READY_TIMEOUT_SEC * 10; i++) {
+		out = nhi_read_reg(sc, TBT_OUTMAILCMD);
+		if ((out & OUTMAILCMD_STATUS_BUSY) == 0)
+			break;
+		pause("tbtmb", hz / 10);
+	}
+
+	if (outp != NULL)
+		*outp = out;
+
+	if (out & OUTMAILCMD_STATUS_BUSY) {
+		tb_printf(sc, "Mailbox busy, OUTMAILCMD=0x%08x\n", out);
+		return (ETIMEDOUT);
+	}
 
 	return (0);
 }

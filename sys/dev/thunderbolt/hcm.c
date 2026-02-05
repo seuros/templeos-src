@@ -136,7 +136,7 @@ hcm_cfg_task(void *arg, int pending)
 	rsc = hcm->nsc->root_rsc;
 	error = tb_config_router_read(rsc, 0, 5, buf);
 	if (error != 0) {
-		free(buf, M_NHI);
+		free(buf, M_THUNDERBOLT);
 		return;
 	}
 

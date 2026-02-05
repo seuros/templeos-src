@@ -199,6 +199,7 @@ struct nhi_softc {
 #define NHI_FORCE_HCM_DEFAULT	0x00
 #define NHI_FORCE_HCM_ON	0x01
 #define NHI_FORCE_HCM_OFF	0x02
+	uint8_t			mbox_connmode;
 
 	uint8_t			uuid[16];
 	uint8_t			lc_uuid[16];
