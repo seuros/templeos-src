@@ -35,6 +35,7 @@ typedef enum {
 	MTK_SWITCH_MT7620,
 	MTK_SWITCH_MT7621,
 	MTK_SWITCH_MT7628,
+	MTK_SWITCH_MT7531,
 } mtk_switch_type;
 
 #define	MTK_IS_SWITCH(_sc, _type)		\
@@ -42,7 +43,10 @@ typedef enum {
 
 #define	MTKSWITCH_MAX_PORTS	7
 #define MTKSWITCH_MAX_PHYS	7
-#define	MTKSWITCH_CPU_PORT	6
+#define	MTKSWITCH_NUM_VLANS	4096
+/* Size of the ALR table in hardware */
+#define MTKSWITCH_NUM_ARL_ENTRIES	4096
+
 
 #define	MTKSWITCH_LINK_UP	(1<<0)
 #define	MTKSWITCH_SPEED_MASK	(3<<1)
@@ -56,6 +60,9 @@ typedef enum {
 struct mtkswitch_softc {
 	struct mtx	sc_mtx;
 	device_t	sc_dev;
+#ifdef	MT7531
+	phandle_t	node;
+#endif
 	struct resource *sc_res;
 	int		numphys;
 	uint32_t	phymap;
@@ -69,6 +76,13 @@ struct mtkswitch_softc {
 	if_t ifp[MTKSWITCH_MAX_PHYS];
 	struct callout	callout_tick;
 	etherswitch_info_t info;
+
+	int		vlans[MTKSWITCH_NUM_VLANS];
+	/* ARL (address resolution table) */
+	struct {
+		int count;
+		etherswitch_atu_entry_t entries[MTKSWITCH_NUM_ARL_ENTRIES];
+	} atu;
 
 	uint32_t	vlan_mode;
 
@@ -158,5 +172,9 @@ struct mtkswitch_softc {
 
 extern void mtk_attach_switch_rt3050(struct mtkswitch_softc *);
 extern void mtk_attach_switch_mt7620(struct mtkswitch_softc *);
+extern void mtk_attach_switch_mt7531(struct mtkswitch_softc *);
+extern int mt7531_sysctl_attach(struct mtkswitch_softc *sc);
+extern int mt7531_atu_fetch_table(device_t dev, etherswitch_atu_table_t *table);
+extern int mt7531_atu_fetch_table_entry(device_t dev, etherswitch_atu_entry_t *e);
 
 #endif	/* __MTKSWITCHVAR_H__ */

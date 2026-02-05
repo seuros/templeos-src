@@ -1,4 +1,5 @@
 /*-
+ * Copyright (c) 2026 Martin Filla
  * Copyright (c) 2016 Stanislav Galabov.
  * Copyright (c) 2011-2012 Stefan Bethke.
  * Copyright (c) 2012 Adrian Chadd.
@@ -38,6 +39,7 @@
 #include <sys/sockio.h>
 #include <sys/sysctl.h>
 #include <sys/systm.h>
+#include <sys/rman.h>
 
 #include <net/if.h>
 #include <net/if_var.h>
@@ -78,31 +80,60 @@ static const struct ofw_compat_data compat_data[] = {
 	{ "mediatek,mt7620-gsw",	MTK_SWITCH_MT7620 },
 	{ "mediatek,mt7621-gsw",	MTK_SWITCH_MT7621 },
 	{ "mediatek,mt7628-esw",	MTK_SWITCH_MT7628 },
+		{ "mediatek,mt7531",		MTK_SWITCH_MT7531},
 
 	/* Sentinel */
 	{ NULL,				MTK_SWITCH_NONE }
 };
+
+static void
+mtkswitch_identify(driver_t *driver, device_t parent)
+{
+	if (device_find_child(parent, "mtkswitch", -1) == NULL)
+		BUS_ADD_CHILD(parent, 0, "mtkswitch", -1);
+}
 
 static int
 mtkswitch_probe(device_t dev)
 {
 	struct mtkswitch_softc *sc;
 	mtk_switch_type switch_type;
+	phandle_t switch_node;
+
+	sc = device_get_softc(dev);
+	bzero(sc, sizeof(*sc));
 
 	if (!ofw_bus_status_okay(dev))
 		return (ENXIO);
 
 	switch_type = ofw_bus_search_compatible(dev, compat_data)->ocd_data;
 	if (switch_type == MTK_SWITCH_NONE)
+	{
+		// TODO: remove this hack
+		switch_node = ofw_bus_find_compatible(OF_finddevice("/"),
+											  "mediatek,mt7531");
+		if (switch_node == MTK_SWITCH_NONE || switch_node == 0)
+		{
 		return (ENXIO);
+		}
+		else
+		{
+			if (bootverbose)
+			{
+				device_printf(dev, "Found switch_node: 0x%x\n", switch_node);
+			}
 
-	sc = device_get_softc(dev);
-	bzero(sc, sizeof(*sc));
+			sc->sc_switchtype = MTK_SWITCH_MT7531;
+		}
+	}
+	else
+	{
 	sc->sc_switchtype = switch_type;
+	}
 
 	device_set_desc(dev, "MTK Switch Driver");
 
-	return (0);
+	return (BUS_PROBE_DEFAULT);
 }
 
 static int
@@ -172,7 +203,22 @@ mtkswitch_attach(device_t dev)
 	/* sc->sc_switchtype is already decided in mtkswitch_probe() */
 	sc->numports = MTKSWITCH_MAX_PORTS;
 	sc->numphys = MTKSWITCH_MAX_PHYS;
-	sc->cpuport = MTKSWITCH_CPU_PORT;
+	if (sc->sc_switchtype == MTK_SWITCH_MT7621 ||
+		sc->sc_switchtype == MTK_SWITCH_MT7621 ||
+		sc->sc_switchtype == MTK_SWITCH_MT7628 ||
+		sc->sc_switchtype == MTK_SWITCH_RT3050 ||
+		sc->sc_switchtype == MTK_SWITCH_RT3352 ||
+		sc->sc_switchtype == MTK_SWITCH_RT5350)
+	{
+		/* mt7621/21/28/3050/3352/5350 has 6 ports */
+		sc->cpuport = 6;
+	}
+	else if (sc->sc_switchtype == MTK_SWITCH_MT7531)
+	{
+		/*bpi-r2-pro has cpu port 5*/
+		sc->cpuport = 5;
+	}
+
 	sc->sc_dev = dev;
 
 	/* Attach switch related functions */
@@ -182,11 +228,21 @@ mtkswitch_attach(device_t dev)
 	}
 
 	if (sc->sc_switchtype == MTK_SWITCH_MT7620 ||
-	    sc->sc_switchtype == MTK_SWITCH_MT7621)
+		sc->sc_switchtype == MTK_SWITCH_MT7621) {
 		mtk_attach_switch_mt7620(sc);
-	else
+	} else if (sc->sc_switchtype == MTK_SWITCH_MT7531) {
+		mtk_attach_switch_mt7531(sc);
+	} else {
 		mtk_attach_switch_rt3050(sc);
+	}
 
+	if (sc->sc_switchtype == MTK_SWITCH_MT7621 ||
+		sc->sc_switchtype == MTK_SWITCH_MT7621 ||
+		sc->sc_switchtype == MTK_SWITCH_MT7628 ||
+		sc->sc_switchtype == MTK_SWITCH_RT3050 ||
+		sc->sc_switchtype == MTK_SWITCH_RT3352 ||
+		sc->sc_switchtype == MTK_SWITCH_RT5350)
+	{
 	/* Allocate resources */
 	rid = 0;
 	sc->sc_res = bus_alloc_resource_any(dev, SYS_RES_MEMORY, &rid,
@@ -194,6 +250,7 @@ mtkswitch_attach(device_t dev)
 	if (sc->sc_res == NULL) {
 		device_printf(dev, "could not map memory\n");
 		return (ENXIO);
+	}
 	}
 
 	mtx_init(&sc->sc_mtx, "mtkswitch", NULL, MTX_DEF);
@@ -232,7 +289,17 @@ mtkswitch_attach(device_t dev)
 		return (err);
 
 	bus_identify_children(dev);
+
+	if (sc->sc_switchtype == MTK_SWITCH_MT7621 ||
+		sc->sc_switchtype == MTK_SWITCH_MT7621 ||
+		sc->sc_switchtype == MTK_SWITCH_MT7628 ||
+		sc->sc_switchtype == MTK_SWITCH_RT3050 ||
+		sc->sc_switchtype == MTK_SWITCH_RT3352 ||
+		sc->sc_switchtype == MTK_SWITCH_RT5350)
+	{
 	bus_enumerate_hinted_children(dev);
+	}
+
 	bus_attach_children(dev);
 
 	callout_init_mtx(&sc->callout_tick, &sc->sc_mtx, 0);
@@ -241,8 +308,13 @@ mtkswitch_attach(device_t dev)
 	mtkswitch_tick(sc);
 	MTKSWITCH_UNLOCK(sc);
 
+	if (sc->sc_switchtype == MTK_SWITCH_MT7531) {
+		mt7531_sysctl_attach(sc);
+	}
+
 	return (0);
 }
+
 
 static int
 mtkswitch_detach(device_t dev)
@@ -592,7 +664,23 @@ mtkswitch_readphy(device_t dev, int phy, int reg)
 }
 
 static int
+mtkswitch_readphy_mii(device_t dev, int phy, int reg)
+{
+	struct mtkswitch_softc *sc = device_get_softc(dev);
+
+	return (sc->hal.mtkswitch_phy_read(dev, phy, reg));
+}
+
+static int
 mtkswitch_writephy(device_t dev, int phy, int reg, int val)
+{
+	struct mtkswitch_softc *sc = device_get_softc(dev);
+
+	return (sc->hal.mtkswitch_phy_write(dev, phy, reg, val));
+}
+
+static int
+mtkswitch_writephy_mii(device_t dev, int phy, int reg, int val)
 {
 	struct mtkswitch_softc *sc = device_get_softc(dev);
 
@@ -617,6 +705,7 @@ mtkswitch_writereg(device_t dev, int addr, int value)
 
 static device_method_t mtkswitch_methods[] = {
 	/* Device interface */
+	DEVMETHOD(device_identify,	mtkswitch_identify),
 	DEVMETHOD(device_probe,		mtkswitch_probe),
 	DEVMETHOD(device_attach,	mtkswitch_attach),
 	DEVMETHOD(device_detach,	mtkswitch_detach),
@@ -625,13 +714,13 @@ static device_method_t mtkswitch_methods[] = {
 	DEVMETHOD(bus_add_child,	device_add_child_ordered),
 
 	/* MII interface */
-	DEVMETHOD(miibus_readreg,	mtkswitch_readphy),
-	DEVMETHOD(miibus_writereg,	mtkswitch_writephy),
+	DEVMETHOD(miibus_readreg,	mtkswitch_readphy_mii),
+	DEVMETHOD(miibus_writereg,	mtkswitch_writephy_mii),
 	DEVMETHOD(miibus_statchg,	mtkswitch_statchg),
 
 	/* MDIO interface */
-	DEVMETHOD(mdio_readreg,		mtkswitch_readphy),
-	DEVMETHOD(mdio_writereg,	mtkswitch_writephy),
+	//DEVMETHOD(mdio_readreg,		mtkswitch_readphy),
+	//DEVMETHOD(mdio_writereg,	mtkswitch_writephy),
 
 	/* ehterswitch interface */
 	DEVMETHOD(etherswitch_lock,	mtkswitch_lock),
@@ -648,16 +737,28 @@ static device_method_t mtkswitch_methods[] = {
 	DEVMETHOD(etherswitch_getconf,	mtkswitch_getconf),
 	DEVMETHOD(etherswitch_setconf,	mtkswitch_setconf),
 
+	DEVMETHOD(etherswitch_fetch_table,      mt7531_atu_fetch_table),
+	DEVMETHOD(etherswitch_fetch_table_entry,	mt7531_atu_fetch_table_entry),
+
 	DEVMETHOD_END
 };
 
 DEFINE_CLASS_0(mtkswitch, mtkswitch_driver, mtkswitch_methods,
     sizeof(struct mtkswitch_softc));
 
-DRIVER_MODULE(mtkswitch, simplebus, mtkswitch_driver, 0, 0);
+//#ifndef MT7531
+//DRIVER_MODULE(mtkswitch, simplebus, mtkswitch_driver, 0, 0);
+//DRIVER_MODULE(miibus, mtkswitch, miibus_driver, 0, 0);
+//DRIVER_MODULE(mdio, mtkswitch, mdio_driver, 0, 0);
+//DRIVER_MODULE(etherswitch, mtkswitch, etherswitch_driver, 0, 0);
+//MODULE_VERSION(mtkswitch, 1);
+//MODULE_DEPEND(mtkswitch, miibus, 1, 1, 1);
+//MODULE_DEPEND(mtkswitch, etherswitch, 1, 1, 1);
+//MODULE_DEPEND(mtkswitch, mdio, 1, 1, 1); //
+//#else
+DRIVER_MODULE(mtkswitch, mdio, mtkswitch_driver, 0, 0);
 DRIVER_MODULE(miibus, mtkswitch, miibus_driver, 0, 0);
-DRIVER_MODULE(mdio, mtkswitch, mdio_driver, 0, 0);
 DRIVER_MODULE(etherswitch, mtkswitch, etherswitch_driver, 0, 0);
 MODULE_VERSION(mtkswitch, 1);
-MODULE_DEPEND(mtkswitch, miibus, 1, 1, 1);
-MODULE_DEPEND(mtkswitch, etherswitch, 1, 1, 1);
+MODULE_DEPEND(mtkswitch, mdio, 1, 1, 1);
+//#endif
