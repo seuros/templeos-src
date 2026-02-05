@@ -273,13 +273,19 @@ nhi_attach(struct nhi_softc *sc)
 	/*
 	 * Get the number of TX/RX paths.  This sizes some of the register
 	 * arrays during allocation and initialization.  USB4 spec says that
-	 * the max is 21.  Alpine Ridge appears to default to 12.
+	 * the max is 21, but older Thunderbolt 1/2 controllers (Light Ridge,
+	 * Falcon Ridge) report 32.  Alpine Ridge reports 12.
 	 */
 	val = GET_HOST_CAPS_PATHS(nhi_read_reg(sc, NHI_HOST_CAPS));
 	tb_debug(sc, DBG_INIT|DBG_NOISY, "Total Paths= %d\n", val);
-	if ((val == 0) || (val > 21) || ((NHI_IS_AR(sc) && val != 12))) {
-		tb_printf(sc, "WARN: unexpected number of paths: %d\n", val);
-		/* return (ENXIO); */
+	if (val == 0) {
+		tb_printf(sc, "WARN: path count is 0\n");
+		return (ENXIO);
+	}
+	if (val > NHI_MAX_NUM_RINGS) {
+		tb_printf(sc, "WARN: path count %d > %d, clamping\n", val,
+		    NHI_MAX_NUM_RINGS);
+		val = NHI_MAX_NUM_RINGS;
 	}
 	sc->path_count = val;
 
@@ -292,6 +298,8 @@ nhi_attach(struct nhi_softc *sc)
 		nhi_configure_ring(sc, sc->ring0);
 		nhi_activate_ring(sc->ring0);
 		nhi_fill_rx_ring(sc, sc->ring0);
+		/* Give hardware time to stabilize after interrupt enable */
+		DELAY(100000); /* 100ms */
 	}
 
 	if (error == 0)
@@ -319,6 +327,7 @@ nhi_detach(struct nhi_softc *sc)
 	if (sc->root_rsc != NULL)
 		tb_router_detach(sc->root_rsc);
 
+	tbdev_remove_domain(sc->uuid);
 	tbdev_remove_interface(sc);
 
 	nhi_pci_disable_interrupts(sc);
@@ -763,6 +772,12 @@ nhi_post_init(void *arg)
 	    "%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x\n",
 	    u[15], u[14], u[13], u[12], u[11], u[10], u[9], u[8], u[7],
 	    u[6], u[5], u[4], u[3], u[2], u[1], u[0]);
+
+	(void)tbdev_add_domain(sc->uuid);
+
+	/* Trigger HCM device discovery */
+	if (NHI_USE_HCM(sc) && sc->hcm != NULL)
+		hcm_router_discover(sc->hcm);
 
 	config_intrhook_disestablish(&sc->ich);
 }

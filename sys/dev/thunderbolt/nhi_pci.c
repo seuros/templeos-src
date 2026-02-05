@@ -430,81 +430,128 @@ void
 nhi_pci_enable_interrupt(struct nhi_ring_pair *r)
 {
 	struct nhi_softc *sc = r->sc;
-	uint32_t ivr[5];
-	u_int offset, reg;
+	uint32_t ivr[12];
+	u_int offset, reg, max_ivr_regs, max_imr_regs, i, ivr_descs;
+	u_int path_count;
+	int has_ne;
 
 	tb_debug(sc, DBG_INIT|DBG_INTR, "Enabling interrupts for ring %d\n",
 	    r->ring_num);
+
+	path_count = sc->path_count;
+	has_ne = (path_count * 3 <= 64);
+
 	/*
 	 * Compute the routing between event type and MSI-X vector.
 	 * 4 bits per descriptor.
+	 * IVR has TX and RX descriptors, and NE on <= 21 path controllers.
+	 * Each descriptor is 4 bits.
+	 * Number of 32-bit registers depends on descriptor count.
 	 */
-	ivr[0] = nhi_read_reg(sc, NHI_IVR0);
-	ivr[1] = nhi_read_reg(sc, NHI_IVR1);
-	ivr[2] = nhi_read_reg(sc, NHI_IVR2);
-	ivr[3] = nhi_read_reg(sc, NHI_IVR3);
-	ivr[4] = nhi_read_reg(sc, NHI_IVR4);
+	ivr_descs = path_count * (has_ne ? 3 : 2);
+	max_ivr_regs = (ivr_descs * 4 + 31) / 32;
+	if (max_ivr_regs > 12)
+		max_ivr_regs = 12;
 
-	/* Program TX */
-	offset = (r->ring_num + IVR_TX_OFFSET) * 4;
+	for (i = 0; i < max_ivr_regs; i++)
+		ivr[i] = nhi_read_reg(sc, NHI_IVR0 + i * 4);
+
+	/* Program TX - ring N gets bit N in IVR space */
+	offset = r->ring_num * 4;
 	NHI_SET_INTERRUPT(offset, 0x0f, r->ring_num);
 
-	/* Now program RX */
-	offset = (r->ring_num + IVR_RX_OFFSET) * 4;
+	/* Program RX - ring N gets bit (N + path_count) */
+	offset = (r->ring_num + path_count) * 4;
 	NHI_SET_INTERRUPT(offset, 0x0f, r->ring_num);
 
-	/* Last, program Nearly Empty.  This one always going to vector 15 */
-	offset = (r->ring_num + IVR_NE_OFFSET) * 4;
-	NHI_SET_INTERRUPT(offset, 0x0f, 0x0f);
+	if (has_ne) {
+		/* Program Nearly Empty - ring N gets bit (N + 2*path_count) */
+		offset = (r->ring_num + 2 * path_count) * 4;
+		NHI_SET_INTERRUPT(offset, 0x0f, 0x0f);
+	}
 
-	nhi_write_reg(sc, NHI_IVR0, ivr[0]);
-	nhi_write_reg(sc, NHI_IVR1, ivr[1]);
-	nhi_write_reg(sc, NHI_IVR2, ivr[2]);
-	nhi_write_reg(sc, NHI_IVR3, ivr[3]);
-	nhi_write_reg(sc, NHI_IVR4, ivr[4]);
+	for (i = 0; i < max_ivr_regs; i++)
+		nhi_write_reg(sc, NHI_IVR0 + i * 4, ivr[i]);
 
 	tb_debug(sc, DBG_INIT|DBG_INTR|DBG_FULL,
-	    "Wrote IVR 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x\n",
-	    ivr[0], ivr[1], ivr[2], ivr[3], ivr[4]);
+	    "Wrote %d IVR registers\n", max_ivr_regs);
 
-	/* Now do the Interrupt Mask Register, 1 bit per descriptor */
-	ivr[0] = nhi_read_reg(sc, NHI_IMR0);
-	ivr[1] = nhi_read_reg(sc, NHI_IMR1);
+	/*
+	 * Interrupt Mask Register, 1 bit per descriptor.
+	 * IMR has TX/RX bits; NE bits are available on <= 21 path controllers.
+	 */
+	max_imr_regs = has_ne ? ((path_count * 3 + 31) / 32) :
+	    RING_INTERRUPT_REG_COUNT(path_count);
+	if (max_imr_regs > 12)
+		max_imr_regs = 12;
 
-	/* Tx */
-	offset = r->ring_num + IMR_TX_OFFSET;
+	for (i = 0; i < max_imr_regs; i++)
+		ivr[i] = nhi_read_reg(sc, NHI_IMR0 + i * 4);
+
+	/* TX - ring N gets bit N */
+	offset = r->ring_num;
 	NHI_SET_INTERRUPT(offset, 0x01, 1);
 
-	/* Rx */
-	offset = r->ring_num + IMR_RX_OFFSET;
+	/* RX - ring N gets bit (N + path_count) */
+	offset = r->ring_num + path_count;
 	NHI_SET_INTERRUPT(offset, 0x01, 1);
 
-	/* NE */
-	offset = r->ring_num + IMR_NE_OFFSET;
-	NHI_SET_INTERRUPT(offset, 0x01, 1);
+	if (has_ne) {
+		/* NE - ring N gets bit (N + 2*path_count) */
+		offset = r->ring_num + 2 * path_count;
+		NHI_SET_INTERRUPT(offset, 0x01, 1);
+	}
 
-	nhi_write_reg(sc, NHI_IMR0, ivr[0]);
-	nhi_write_reg(sc, NHI_IMR1, ivr[1]);
+	for (i = 0; i < max_imr_regs; i++)
+		nhi_write_reg(sc, NHI_IMR0 + i * 4, ivr[i]);
+
 	tb_debug(sc, DBG_INIT|DBG_FULL,
-	    "Wrote IMR 0x%08x 0x%08x\n", ivr[0], ivr[1]);
+	    "Wrote %d IMR registers\n", max_imr_regs);
 }
 
 void
 nhi_pci_disable_interrupts(struct nhi_softc *sc)
 {
+	u_int max_imr_regs, max_isr_regs, max_ivr_regs, i, ivr_descs;
+	u_int path_count;
+	int has_ne;
 
 	tb_debug(sc, DBG_INIT, "Disabling interrupts\n");
-	nhi_write_reg(sc, NHI_IMR0, 0);
-	nhi_write_reg(sc, NHI_IMR1, 0);
-	nhi_write_reg(sc, NHI_IVR0, 0);
-	nhi_write_reg(sc, NHI_IVR1, 0);
-	nhi_write_reg(sc, NHI_IVR2, 0);
-	nhi_write_reg(sc, NHI_IVR3, 0);
-	nhi_write_reg(sc, NHI_IVR4, 0);
 
-	/* Dummy reads to clear pending bits */
-	nhi_read_reg(sc, NHI_ISR0);
-	nhi_read_reg(sc, NHI_ISR1);
+	/*
+	 * Clear all interrupt and notify registers based on path count.
+	 * If the device is not yet initialized, fall back to HOST_CAPS
+	 * and clamp to the driver max.
+	 */
+	path_count = sc->path_count;
+	if (path_count == 0)
+		path_count = GET_HOST_CAPS_PATHS(nhi_read_reg(sc,
+		    NHI_HOST_CAPS));
+	if (path_count == 0)
+		path_count = NHI_MAX_NUM_RINGS;
+	if (path_count > NHI_MAX_NUM_RINGS)
+		path_count = NHI_MAX_NUM_RINGS;
+
+	has_ne = (path_count * 3 <= 64);
+	max_imr_regs = has_ne ? ((path_count * 3 + 31) / 32) :
+	    RING_INTERRUPT_REG_COUNT(path_count);
+	max_isr_regs = RING_NOTIFY_REG_COUNT(path_count);
+	ivr_descs = path_count * (has_ne ? 3 : 2);
+	max_ivr_regs = (ivr_descs * 4 + 31) / 32;
+	if (max_ivr_regs > 12)
+		max_ivr_regs = 12;
+
+	/* Clear IMR registers */
+	for (i = 0; i < max_imr_regs && i < 12; i++)
+		nhi_write_reg(sc, NHI_IMR0 + i * 4, 0);
+
+	/* Clear IVR registers */
+	for (i = 0; i < max_ivr_regs; i++)
+		nhi_write_reg(sc, NHI_IVR0 + i * 4, 0);
+
+	/* Dummy reads to clear pending bits in ISR registers */
+	for (i = 0; i < max_isr_regs && i < 12; i++)
+		nhi_read_reg(sc, NHI_ISR0 + i * 4);
 }
 
 /*

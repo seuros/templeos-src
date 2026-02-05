@@ -56,7 +56,9 @@
 #include <dev/thunderbolt/tb_var.h>
 #include <dev/thunderbolt/tbcfg_reg.h>
 #include <dev/thunderbolt/router_var.h>
+#include <dev/thunderbolt/hcm_var.h>
 #include <dev/thunderbolt/tb_debug.h>
+#include <dev/thunderbolt/tb_dev.h>
 
 static int router_alloc_cmd(struct router_softc *, struct router_command **);
 static void router_free_cmd(struct router_softc *, struct router_command *);
@@ -186,6 +188,27 @@ router_insert(struct router_softc *sc, struct router_softc *parent)
 	return (0);
 }
 
+static void
+router_hotplug_intr(void *context, union nhi_ring_desc *ring,
+    struct nhi_cmd_frame *nhicmd)
+{
+	struct router_softc *sc = context;
+	struct tb_cfg_hotplug hp;
+	u_int adap, unplug;
+
+	hp.route.hi = be32toh(nhicmd->data[0]);
+	hp.route.lo = be32toh(nhicmd->data[1]);
+	hp.adapter_attrs = be32toh(nhicmd->data[2]);
+	adap = hp.adapter_attrs & TB_CFG_ADPT_MASK;
+	unplug = hp.adapter_attrs & TB_CFG_UPG_UNPLUG;
+
+	tb_printf(sc, "Hotplug %s on adapter %d, route 0x%08x%08x\n",
+	    unplug ? "UNPLUG" : "PLUG", adap, hp.route.hi, hp.route.lo);
+
+	if (sc->nsc->hcm != NULL)
+		hcm_router_discover(sc->nsc->hcm);
+}
+
 static int
 router_register_interrupts(struct router_softc *sc)
 {
@@ -195,6 +218,7 @@ router_register_interrupts(struct router_softc *sc)
 	struct nhi_dispatch rx[] = { { PDF_READ, router_response_intr, sc },
 				     { PDF_WRITE, router_response_intr, sc },
 				     { PDF_NOTIFY, router_notify_intr, sc },
+				     { PDF_HOTPLUG, router_hotplug_intr, sc },
 				     { 0, NULL, NULL } };
 
 	return (nhi_register_pdf(sc->ring0, tx, rx));
@@ -204,6 +228,7 @@ int
 tb_router_attach(struct router_softc *parent, tb_route_t route)
 {
 	struct router_softc *sc;
+	int error;
 
 	tb_debug(parent, DBG_ROUTER|DBG_EXTRA, "tb_router_attach called\n");
 
@@ -224,7 +249,11 @@ tb_router_attach(struct router_softc *parent, tb_route_t route)
 
 	router_insert(sc, parent);
 
-	return (_tb_router_attach(sc));
+	error = _tb_router_attach(sc);
+	if (error == 0)
+		tbdev_add_router(sc);
+
+	return (error);
 }
 
 int
@@ -269,6 +298,7 @@ tb_router_attach_root(struct nhi_softc *nsc, tb_route_t route)
 		return (error);
 
 	bcopy((uint8_t *)sc->uuid, nsc->uuid, 16);
+	tbdev_add_router(sc);
 	return (0);
 }
 
@@ -331,6 +361,7 @@ tb_router_detach(struct router_softc *sc)
 	if (sc->adapters != NULL)
 		free(sc->adapters, M_THUNDERBOLT);
 
+	tbdev_remove_router(sc);
 	if (sc != NULL)
 		free(sc, M_THUNDERBOLT);
 
@@ -746,7 +777,6 @@ router_notify_intr(void *context, union nhi_ring_desc *ring, struct nhi_cmd_fram
 	case TB_CFG_ERR_LEN:
 	case TB_CFG_ERR_HEC:
 	case TB_CFG_ERR_FC:
-	case TB_CFG_ERR_PLUG:
 	case TB_CFG_ERR_LOCK:
 	case TB_CFG_HP_ACK:
 	case TB_CFG_DP_BW:
@@ -755,6 +785,15 @@ router_notify_intr(void *context, union nhi_ring_desc *ring, struct nhi_cmd_fram
 			cmd->ev = ev;
 			cmd->callback(sc, cmd, cmd->callback_arg);
 		}
+		break;
+	case TB_CFG_ERR_PLUG:
+		if (sc->inflight_cmd != NULL) {
+			cmd = sc->inflight_cmd;
+			cmd->ev = ev;
+			cmd->callback(sc, cmd, cmd->callback_arg);
+		}
+		if (sc->nsc->hcm != NULL)
+			hcm_router_discover(sc->nsc->hcm);
 		break;
 	default:
 		break;
