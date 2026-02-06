@@ -177,9 +177,9 @@ SYSCTL_BOOL(_debug, OID_AUTO, hwpstate_pstate_limit, CTLFLAG_RWTUN,
     "CurPstateLimit");
 
 static bool hwpstate_pkg_ctrl_enable = true;
-SYSCTL_BOOL(_machdep, OID_AUTO, hwpstate_pkg_ctrl, CTLFLAG_RDTUN,
+SYSCTL_BOOL(_machdep, OID_AUTO, hwpstate_amd_pkg_ctrl, CTLFLAG_RDTUN,
     &hwpstate_pkg_ctrl_enable, 0,
-    "Set 1 (default) to enable package-level control, 0 to disable");
+    "Set 1 (default) to enable AMD package-level control, 0 to disable");
 
 static bool hwpstate_amd_cppc_enable = true;
 SYSCTL_BOOL(_machdep, OID_AUTO, hwpstate_amd_cppc_enable, CTLFLAG_RDTUN,
