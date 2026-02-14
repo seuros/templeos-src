@@ -77,6 +77,16 @@ struct tb_pcib_softc {
 #define TB_IS_DFP(sc)	(((sc)->flags & TB_FLAGS_ISUFP) == 0)
 
 /* PCI IDs for the TB bridges */
+#define TB_DEV_LR		0x1513
+#define TB_DEV_ER		0x151a
+#define TB_DEV_LP		0x151b
+#define TB_DEV_CR_4C		0x1547
+#define TB_DEV_CR_2C		0x1548
+#define TB_DEV_PR		0x1549
+#define TB_DEV_RR_2C		0x1567
+#define TB_DEV_RR_4C		0x1569
+#define TB_DEV_FR_2C		0x156b
+#define TB_DEV_FR_4C		0x156d
 #define TB_DEV_AR_2C		0x1576
 #define TB_DEV_AR_LP		0x15c0
 #define TB_DEV_AR_C_4C		0x15d3

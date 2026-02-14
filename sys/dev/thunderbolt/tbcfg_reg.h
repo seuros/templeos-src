@@ -352,8 +352,79 @@ struct tb_cfg_cap_lane {
 	uint16_t		lle_enable;
 } __packed;
 
-/* Config space path registers 8.2.3.1 */
-struct tb_cfg_path {
+/* Config space adapter extended registers, DWORD 5 of 8.2.2.1 */
+#define ADP_CS5_MAX_IN_HOPID_MASK	GENMASK(10,0)
+#define ADP_CS5_MAX_OUT_HOPID_SHIFT	11
+#define ADP_CS5_MAX_OUT_HOPID_MASK	GENMASK(21,11)
+
+/* Minimum HopID for data paths (0-7 reserved for control) */
+#define TB_PATH_MIN_HOPID		8
+
+/*
+ * DP adapter config space registers (8.2.5)
+ * Offsets relative to adapter capability base (cap_adap).
+ */
+#define ADP_DP_CS_0			0x00
+#define ADP_DP_CS_0_VIDEO_HOPID_SHIFT	16
+#define ADP_DP_CS_0_VIDEO_HOPID_MASK	GENMASK(26,16)
+#define ADP_DP_CS_0_AE			(1 << 30)	/* AUX Enable */
+#define ADP_DP_CS_0_VE			(1 << 31)	/* Video Enable */
+
+#define ADP_DP_CS_1			0x01
+#define ADP_DP_CS_1_AUX_TX_HOPID_MASK	GENMASK(10,0)
+#define ADP_DP_CS_1_AUX_RX_HOPID_SHIFT	11
+#define ADP_DP_CS_1_AUX_RX_HOPID_MASK	GENMASK(21,11)
+
+#define ADP_DP_CS_2			0x02
+#define ADP_DP_CS_2_NRD_MLC_MASK	GENMASK(2,0)
+#define ADP_DP_CS_2_HPD			(1 << 6)	/* Hot Plug Detect */
+#define ADP_DP_CS_2_NRD_MLR_SHIFT	7
+#define ADP_DP_CS_2_NRD_MLR_MASK	GENMASK(9,7)
+#define ADP_DP_CS_2_CA			(1 << 10)
+#define ADP_DP_CS_2_GR_SHIFT		11
+#define ADP_DP_CS_2_GR_MASK		GENMASK(12,11)
+#define ADP_DP_CS_2_ESTIMATED_BW_SHIFT	24
+#define ADP_DP_CS_2_ESTIMATED_BW_MASK	GENMASK(31,24)
+
+#define ADP_DP_CS_3			0x03
+#define ADP_DP_CS_3_HPDC		(1 << 9)	/* HPD Changed */
+
+/* PCIe adapter config space registers (8.2.3) */
+#define ADP_PCIE_CS_0			0x00
+#define ADP_PCIE_CS_0_PE		(1 << 31)	/* PCIe Enable */
+
+/* USB3 adapter config space registers (8.2.4) */
+#define ADP_USB3_CS_0			0x00
+#define ADP_USB3_CS_0_PE		(1 << 31)	/* USB3 Enable */
+
+/* Adapter capability IDs */
+#define TB_CFG_CAP_ADP			0x04	/* Adapter-specific cap */
+
+/*
+ * Path config space hop entry (8.2.3.1)
+ * Each hop occupies 2 DWORDs at offset hopid*2 in path config space.
+ */
+struct tb_cfg_hop {
+	/* DWORD 0 */
+	uint32_t	next_hop:11;	/* HopID on next switch ingress */
+	uint32_t	out_port:6;	/* Egress port on this switch */
+	uint32_t	initial_credits:7;
+	uint32_t	pmps:1;
+	uint32_t	_rsvd0:6;
+	uint32_t	enable:1;
+	/* DWORD 1 */
+	uint32_t	weight:4;
+	uint32_t	_rsvd1:4;
+	uint32_t	priority:3;
+	uint32_t	drop_packages:1;
+	uint32_t	counter:11;
+	uint32_t	counter_enable:1;
+	uint32_t	ingress_fc:1;
+	uint32_t	egress_fc:1;
+	uint32_t	ingress_shared_buffer:1;
+	uint32_t	egress_shared_buffer:1;
+	uint32_t	pending:1;
+	uint32_t	_rsvd2:3;
 } __packed;
 
 /* Config space counter registers 8.2.4 */

@@ -38,6 +38,8 @@ struct hcm_softc {
 
 	struct task		cfg_task;
 	struct taskqueue	*taskqueue;
+	uint8_t			connected;
+	volatile uint8_t	discovery_pending;
 };
 
 int hcm_attach(struct nhi_softc *);

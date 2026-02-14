@@ -90,6 +90,38 @@ struct tb_pcib_ident {
 	uint32_t	flags;		/* This follows the tb_softc flags */
 	const char	*desc;
 } tb_pcib_identifiers[] = {
+	{ VENDOR_INTEL, TB_DEV_LR, 0xffff, 0xffff, TB_GEN_TB1|TB_HWIF_UNK,
+	    "Thunderbolt 1 PCI-PCI Bridge (Light Ridge)" },
+	{ VENDOR_INTEL, TB_DEV_ER, 0xffff, 0xffff, TB_GEN_TB1|TB_HWIF_UNK,
+	    "Thunderbolt 1 PCI-PCI Bridge (Eagle Ridge)" },
+	{ VENDOR_INTEL, TB_DEV_LP, 0xffff, 0xffff, TB_GEN_TB1|TB_HWIF_UNK,
+	    "Thunderbolt 1 PCI-PCI Bridge (Light Peak)" },
+	{ VENDOR_INTEL, TB_DEV_CR_4C, 0xffff, 0xffff, TB_GEN_TB1|TB_HWIF_UNK,
+	    "Thunderbolt 1 PCI-PCI Bridge (Cactus Ridge 4C)" },
+	{ VENDOR_INTEL, TB_DEV_CR_2C, 0xffff, 0xffff, TB_GEN_TB1|TB_HWIF_UNK,
+	    "Thunderbolt 1 PCI-PCI Bridge (Cactus Ridge 2C)" },
+	{ VENDOR_INTEL, TB_DEV_PR, 0xffff, 0xffff, TB_GEN_TB1|TB_HWIF_UNK,
+	    "Thunderbolt 1 PCI-PCI Bridge (Port Ridge)" },
+	{ VENDOR_INTEL, TB_DEV_RR_2C, 0xffff, 0xffff, TB_GEN_TB1|TB_HWIF_UNK,
+	    "Thunderbolt 1 PCI-PCI Bridge (Redwood Ridge 2C)" },
+	{ VENDOR_INTEL, TB_DEV_RR_4C, 0xffff, 0xffff, TB_GEN_TB1|TB_HWIF_UNK,
+	    "Thunderbolt 1 PCI-PCI Bridge (Redwood Ridge 4C)" },
+	{ VENDOR_INTEL, TB_DEV_FR_2C, 0xffff, 0xffff, TB_GEN_TB2|TB_HWIF_UNK,
+	    "Thunderbolt 2 PCI-PCI Bridge (Falcon Ridge 2C)" },
+	{ VENDOR_INTEL, TB_DEV_FR_4C, 0xffff, 0xffff, TB_GEN_TB2|TB_HWIF_UNK,
+	    "Thunderbolt 2 PCI-PCI Bridge (Falcon Ridge 4C)" },
+	{ VENDOR_INTEL, TB_DEV_AR_2C, 0xffff, 0xffff, TB_GEN_TB3|TB_HWIF_AR,
+	    "Thunderbolt 3 PCI-PCI Bridge (Alpine Ridge 2C)" },
+	{ VENDOR_INTEL, TB_DEV_AR_LP, 0xffff, 0xffff, TB_GEN_TB3|TB_HWIF_AR,
+	    "Thunderbolt 3 PCI-PCI Bridge (Alpine Ridge LP)" },
+	{ VENDOR_INTEL, TB_DEV_AR_C_4C, 0xffff, 0xffff, TB_GEN_TB3|TB_HWIF_AR,
+	    "Thunderbolt 3 PCI-PCI Bridge (Alpine Ridge C 4C)" },
+	{ VENDOR_INTEL, TB_DEV_AR_C_2C, 0xffff, 0xffff, TB_GEN_TB3|TB_HWIF_AR,
+	    "Thunderbolt 3 PCI-PCI Bridge C (Alpine Ridge C 2C)" },
+	{ VENDOR_INTEL, TB_DEV_ICL_0, 0xffff, 0xffff, TB_GEN_TB3|TB_HWIF_ICL,
+	    "Thunderbolt 3 PCI-PCI Bridge (IceLake)" },
+	{ VENDOR_INTEL, TB_DEV_ICL_1, 0xffff, 0xffff, TB_GEN_TB3|TB_HWIF_ICL,
+	    "Thunderbolt 3 PCI-PCI Bridge (IceLake)" },
 	{ 0, 0, 0, 0, 0, NULL }
 };
 
@@ -261,7 +293,7 @@ tb_pcib_attach_common(device_t dev)
 	 * Take the AR bridge out of low-power mode.
 	 * XXX AR only?
 	 */
-	if ((1 || TB_IS_AR(sc)) && TB_IS_ROOT(sc)) {
+	if (TB_IS_AR(sc) && TB_IS_ROOT(sc)) {
 		struct tb_lcmbox_cmd cmd;
 
 		cmd.cmd = LC_MBOXOUT_CMD_SXEXIT_TBT;

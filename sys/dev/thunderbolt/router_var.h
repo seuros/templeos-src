@@ -34,6 +34,51 @@
 struct router_softc;
 struct router_command;
 struct router_topo;
+struct tb_tunnel;
+struct router_hotplug_task;
+
+/*
+ * A single hop in a tunnel path.
+ */
+struct tb_path_hop {
+	struct router_softc	*rsc;		/* switch containing this hop */
+	u_int			in_port;	/* ingress adapter */
+	u_int			in_hopid;	/* ingress HopID */
+	u_int			out_port;	/* egress adapter (from hop reg) */
+	u_int			next_hopid;	/* HopID on next switch ingress */
+	struct tb_cfg_hop	hop;		/* raw hop register contents */
+};
+
+#define TB_PATH_MAX_HOPS	16
+
+struct tb_path {
+	struct tb_path_hop	hops[TB_PATH_MAX_HOPS];
+	int			nhops;
+	int			activated;	/* non-zero if path is live */
+};
+
+enum tb_tunnel_type {
+	TB_TUNNEL_DP = 0,
+	TB_TUNNEL_PCIE,
+	TB_TUNNEL_USB3,
+};
+
+/*
+ * A discovered tunnel.  DP tunnels have 3 paths (video, aux_tx, aux_rx).
+ * PCIe tunnels have 2 paths (down, up).
+ */
+#define TB_TUNNEL_MAX_PATHS	3
+
+struct tb_tunnel {
+	SLIST_ENTRY(tb_tunnel)	link;
+	enum tb_tunnel_type	type;
+	struct router_softc	*src_rsc;	/* source router */
+	struct router_softc	*dst_rsc;	/* destination router */
+	u_int			src_adap;	/* source adapter number */
+	u_int			dst_adap;	/* destination adapter number */
+	struct tb_path		paths[TB_TUNNEL_MAX_PATHS];
+	int			npaths;
+};
 
 typedef void (*router_callback_t)(struct router_softc *,
     struct router_command *, void *);
@@ -61,10 +106,12 @@ struct router_softc {
 	tb_route_t		route;
 	device_t		dev;
 	struct nhi_softc	*nsc;
+	struct router_softc	*parent;
 
 	struct mtx		mtx;
 	struct nhi_ring_pair	*ring0;
 	TAILQ_HEAD(,router_command) cmd_queue;
+	TAILQ_HEAD(, router_hotplug_task) hotplug_tasks;
 
 	struct router_command	*inflight_cmd;
 
@@ -74,6 +121,9 @@ struct router_softc {
 	struct router_softc	**adapters;
 
 	uint32_t		uuid[4];
+	volatile int		sc_dying;	/* set during detach */
+
+	SLIST_HEAD(, tb_tunnel)	tunnel_list;	/* discovered tunnels */
 };
 
 struct router_cfg_cap {
@@ -105,6 +155,8 @@ int tb_config_find_router_vsc(struct router_softc *, u_int, u_int *);
 int tb_config_find_router_vsec(struct router_softc *, u_int, u_int *);
 int tb_config_find_adapter_cap(struct router_softc *, u_int, u_int, u_int *);
 int tb_config_get_lc_uuid(struct router_softc *, uint8_t *);
+int tb_tunnel_discover_dp(struct router_softc *);
+void tb_tunnel_free_all(struct router_softc *);
 
 #define TB_CONFIG_ADDR(seq, space, adapter, dwlen, offset) \
     ((seq << TB_CFG_SEQ_SHIFT) | space | \
@@ -112,7 +164,20 @@ int tb_config_get_lc_uuid(struct router_softc *, uint8_t *);
     (offset & TB_CFG_ADDR_MASK))
 
 #define TB_ROUTE(router) \
-    ((uint64_t)(router)->route.hi << 32) | (router)->route.lo
+	    ((uint64_t)(router)->route.hi << 32) | (router)->route.lo
+
+static __inline tb_route_t
+TB_CHILD_ROUTE(struct router_softc *router, u_int adap)
+{
+	tb_route_t route;
+	uint64_t child;
+
+	child = TB_ROUTE(router) | ((uint64_t)adap << (router->depth * 8));
+	route.hi = child >> 32;
+	route.lo = child & 0xffffffffU;
+
+	return (route);
+}
 
 static __inline void *
 router_get_frame_data(struct router_command *cmd)

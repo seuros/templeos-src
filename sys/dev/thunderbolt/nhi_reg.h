@@ -43,6 +43,10 @@
 
 /* PCI Vendor and Device ID's */
 #define	VENDOR_INTEL		0x8086
+#define DEVICE_LR_NHI		0x1513	/* Light Ridge (TB1) */
+#define DEVICE_CR_4C_NHI	0x1547	/* Cactus Ridge 4C (TB1 gen2) */
+#define DEVICE_FR_2C_NHI	0x156a	/* Falcon Ridge 2C (TB2) */
+#define DEVICE_FR_4C_NHI	0x156c	/* Falcon Ridge 4C (TB2) */
 #define DEVICE_AR_2C_NHI	0x1575
 #define DEVICE_AR_DP_B_NHI	0x1577
 #define	DEVICE_AR_DP_C_NHI	0x15d2
@@ -157,13 +161,9 @@
 
 /*
  *   Interrupt Vector Allocation.
- *   There are 12 4-bit descriptors for TX, 12 4-bit descriptors for RX,
- *   and 12 4-bit descriptors for Nearly Empty.  Each descriptor holds
- *   the numerical value of the MSI-X vector that will receive the
- *   corresponding interrupt.
- *   Bits 0-31 of IVR0 and 0-15 of IVR1 are for TX
- *   Bits 16-31 of IVR1 and 0-31 of IVR2 are for RX
- *   Bits 0-31 of IVR3 and 0-15 of IVR4 are for Nearly Empty
+ *   There are path_count 4-bit descriptors for TX, RX, and NE. Each
+ *   descriptor holds the MSI-X vector for that path/event.
+ *   Descriptors are laid out consecutively: TX, then RX, then NE.
  */
 #define NHI_IVR0			0x38c40
 #define NHI_IVR1			0x38c44
@@ -176,7 +176,14 @@
 
 /* Native Host Interface Control registers */
 #define NHI_HOST_CAPS			0x39640
-#define	GET_HOST_CAPS_PATHS(val)	((val) & 0x3f)
+#define	GET_HOST_CAPS_PATHS(val)	((val) & 0x3ff)
+
+/*
+ * Dynamic register count macros.
+ * Notify registers scale with TX/RX/NE; interrupt mask registers are TX/RX.
+ */
+#define RING_NOTIFY_REG_COUNT(paths)     (((paths) * 3 + 31) / 32)
+#define RING_INTERRUPT_REG_COUNT(paths)  (((paths) * 2 + 31) / 32)
 
 /*
  * This definition comes from the Linux driver.  In the USB4 spec, this

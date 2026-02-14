@@ -41,7 +41,7 @@ MALLOC_DECLARE(M_NHI);
 #define NHI_DEFAULT_NUM_RINGS	1
 #define NHI_MAX_NUM_RINGS	32	/* XXX 2? */
 #define NHI_RING0_FRAME_SIZE	256
-#define NHI_MAILBOX_TIMEOUT	15
+#define NHI_MAILBOX_TIMEOUT	500	/* milliseconds, matches Linux */
 
 #define NHI_CMD_TIMEOUT		3	/* 3 seconds */
 
@@ -142,9 +142,20 @@ struct nhi_softc {
 	u_int			debug;
 	u_int			hwflags;
 #define NHI_TYPE_UNKNOWN	0x00
+#define NHI_TYPE_AR		0x01		/* Alpine Ridge */
+#define NHI_TYPE_TR		0x02		/* Titan Ridge */
+#define NHI_TYPE_ICL		0x03		/* IceLake */
+#define NHI_TYPE_MR		0x04		/* Maple Ridge */
+#define NHI_TYPE_ADL		0x05		/* AlderLake */
+#define NHI_TYPE_FW_CM		0x06		/* TB1/TB2, firmware CM */
 #define NHI_TYPE_USB4		0x0f
 #define NHI_TYPE_MASK		0x0f
 #define NHI_MBOX_BUSY		0x10
+	u_int			caps;
+#define NHI_CAP_ICM		0x01
+#define NHI_CAP_HCM		0x02
+#define NHI_USE_ICM(sc)		((sc)->caps & NHI_CAP_ICM)
+#define NHI_USE_HCM(sc)		((sc)->caps & NHI_CAP_HCM)
 	struct hcm_softc	*hcm;
 	struct router_softc	*root_rsc;
 
@@ -184,6 +195,15 @@ struct nhi_softc {
 
 	struct intr_config_hook	ich;
 
+	uint8_t			force_hcm;
+#define NHI_FORCE_HCM_DEFAULT	0x00
+#define NHI_FORCE_HCM_ON	0x01
+#define NHI_FORCE_HCM_OFF	0x02
+	uint8_t			mbox_connmode;
+	uint8_t			fw_cm_set;
+	uint8_t			fw_safe_mode;
+	uint8_t			firmware_managed;
+
 	uint8_t			uuid[16];
 	uint8_t			lc_uuid[16];
 };
@@ -194,7 +214,11 @@ struct nhi_dispatch {
 	void			*context;
 };
 
+#define NHI_IS_AR(sc)	(((sc)->hwflags & NHI_TYPE_MASK) == NHI_TYPE_AR)
+#define NHI_IS_TR(sc)	(((sc)->hwflags & NHI_TYPE_MASK) == NHI_TYPE_TR)
+#define NHI_IS_ICL(sc)	(((sc)->hwflags & NHI_TYPE_MASK) == NHI_TYPE_ICL)
 #define NHI_IS_USB4(sc)	(((sc)->hwflags & NHI_TYPE_MASK) == NHI_TYPE_USB4)
+#define NHI_IS_FW_CM(sc) (((sc)->hwflags & NHI_TYPE_MASK) == NHI_TYPE_FW_CM)
 
 int nhi_pci_configure_interrupts(struct nhi_softc *sc);
 void nhi_pci_enable_interrupt(struct nhi_ring_pair *r);
@@ -212,6 +236,7 @@ struct nhi_cmd_frame * nhi_alloc_tx_frame(struct nhi_ring_pair *);
 void nhi_free_tx_frame(struct nhi_ring_pair *, struct nhi_cmd_frame *);
 
 int nhi_inmail_cmd(struct nhi_softc *, uint32_t, uint32_t);
+int nhi_ensure_fw_cm_mode(struct nhi_softc *);
 int nhi_outmail_cmd(struct nhi_softc *, uint32_t *);
 
 int nhi_tx_schedule(struct nhi_ring_pair *, struct nhi_cmd_frame *);

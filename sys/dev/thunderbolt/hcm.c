@@ -28,7 +28,14 @@
 
 #include "opt_thunderbolt.h"
 
-/* Host Configuration Manager (HCM) for USB4 and later TB3 */
+/*
+ * Host Configuration Manager (HCM) for USB4 and later TB3.
+ *
+ * On TB1/TB2 (NHI_TYPE_FW_CM), the HCM relies on firmware-managed PCIe
+ * tunnels established before the driver loads.  Apple EFI sets these up;
+ * coreboot requires a payload that initialises the Light Ridge controller.
+ * The driver maintains the firmware CM state but does not create tunnels.
+ */
 #include <sys/types.h>
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -60,6 +67,7 @@
 #include <dev/thunderbolt/hcm_var.h>
 
 static void hcm_cfg_task(void *, int);
+static void hcm_disconnect(struct hcm_softc *);
 
 int
 hcm_attach(struct nhi_softc *nsc)
@@ -78,10 +86,21 @@ hcm_attach(struct nhi_softc *nsc)
 	hcm->nsc = nsc;
 	nsc->hcm = hcm;
 
+	/*
+	 * Set FW CM mode and send SAVE_CONNECTED before interrupt
+	 * handlers are registered to pre-authorise connected devices
+	 * and prevent a PDF_HOTPLUG storm.
+	 */
+	if (NHI_IS_FW_CM(nsc))
+		nhi_ensure_fw_cm_mode(nsc);
+
 	hcm->taskqueue = taskqueue_create("hcm_event", M_NOWAIT,
 	    taskqueue_thread_enqueue, &hcm->taskqueue);
-	if (hcm->taskqueue == NULL)
+	if (hcm->taskqueue == NULL) {
+		nsc->hcm = NULL;
+		free(hcm, M_THUNDERBOLT);
 		return (ENOMEM);
+	}
 	taskqueue_start_threads(&hcm->taskqueue, 1, PI_DISK, "tbhcm%d_tq",
 	    device_get_unit(nsc->dev));
 	TASK_INIT(&hcm->cfg_task, 0, hcm_cfg_task, hcm);
@@ -95,19 +114,158 @@ hcm_detach(struct nhi_softc *nsc)
 	struct hcm_softc *hcm;
 
 	hcm = nsc->hcm;
-	if (hcm->taskqueue)
+	if (hcm == NULL)
+		return (0);
+	if (hcm->taskqueue) {
+		taskqueue_drain(hcm->taskqueue, &hcm->cfg_task);
 		taskqueue_free(hcm->taskqueue);
+	}
+	nsc->hcm = NULL;
+	free(hcm, M_THUNDERBOLT);
 
 	return (0);
+}
+
+/*
+ * Rescan PCI buses behind Thunderbolt bridges.  After the firmware
+ * connection manager authorises connected devices, the PCIe tunnels
+ * become active and downstream devices (ethernet, FireWire, USB
+ * bridge) start responding to config-space reads.  If the TB module
+ * was loaded after the initial PCI bus scan, those buses will be
+ * empty and need a rescan.
+ *
+ * Walk from the NHI device up to the parent PCI bus (which hosts all
+ * Light Ridge downstream bridges), then rescan every sibling PCI bus.
+ */
+static void
+hcm_pci_rescan(struct hcm_softc *hcm)
+{
+	device_t nhi_dev, pci_bus, bridge, parent_bus;
+	device_t *children;
+	int i, nchildren;
+
+	nhi_dev = hcm->dev;
+
+	/*
+	 * nhi0 → pci4 → pcib4 → pci3
+	 * We want pci3, the bus that hosts all downstream bridges.
+	 */
+	pci_bus = device_get_parent(nhi_dev);	/* pci4 */
+	if (pci_bus == NULL)
+		return;
+	bridge = device_get_parent(pci_bus);	/* pcib4 */
+	if (bridge == NULL)
+		return;
+	parent_bus = device_get_parent(bridge);	/* pci3 */
+	if (parent_bus == NULL)
+		return;
+
+	/*
+	 * Re-enumerate the bus that owns the downstream bridges first so a
+	 * previously deleted tbolt bridge device is recreated on replug.
+	 */
+	bus_topo_lock();
+	if (device_is_attached(parent_bus))
+		BUS_RESCAN(parent_bus);
+	bus_topo_unlock();
+
+	/* Enumerate all bridges on the parent bus. */
+	if (device_get_children(parent_bus, &children, &nchildren) != 0)
+		return;
+
+	bus_topo_lock();
+	for (i = 0; i < nchildren; i++) {
+		device_t child, *grandchildren;
+		int j, ngrandchildren;
+
+		/* Skip our own bridge (pcib4 / NHI). */
+		if (children[i] == bridge)
+			continue;
+
+		/* Find the PCI bus child of each sibling bridge. */
+		if (device_get_children(children[i], &grandchildren,
+		    &ngrandchildren) != 0)
+			continue;
+
+		for (j = 0; j < ngrandchildren; j++) {
+			child = grandchildren[j];
+			if (device_is_attached(child)) {
+				tb_printf(hcm, "rescanning %s\n",
+				    device_get_nameunit(child));
+				BUS_RESCAN(child);
+			}
+		}
+		free(grandchildren, M_TEMP);
+	}
+	bus_topo_unlock();
+	free(children, M_TEMP);
 }
 
 int
 hcm_router_discover(struct hcm_softc *hcm)
 {
 
+	if (hcm->discovery_pending)
+		return (0);
+	hcm->discovery_pending = 1;
 	taskqueue_enqueue(hcm->taskqueue, &hcm->cfg_task);
 
 	return (0);
+}
+
+/*
+ * Recursively detach child routers from the adapter tree, then delete the
+ * corresponding tbolt PCIe bridge device so downstream devices (e.g. bge0)
+ * are removed cleanly before their hardware disappears.
+ */
+static void
+hcm_disconnect(struct hcm_softc *hcm)
+{
+	struct router_softc *rsc;
+	devclass_t dc;
+	device_t tbolt;
+	u_int i;
+
+	if (!hcm->connected)
+		return;
+	hcm->connected = 0;
+
+	rsc = hcm->nsc->root_rsc;
+	if (rsc == NULL)
+		return;
+
+	tb_printf(hcm, "TB disconnect: cleaning up downstream routers\n");
+
+	/* Detach all child routers tracked in the adapter array. */
+	if (rsc->adapters != NULL) {
+		for (i = 0; i <= rsc->max_adap; i++) {
+			if (rsc->adapters[i] != NULL) {
+				if (tb_router_detach(rsc->adapters[i]) != 0)
+					tb_printf(hcm,
+					    "TB disconnect: adapter %u busy, keeping topology entry\n",
+					    i);
+			}
+		}
+	}
+
+	/*
+	 * Delete the tbolt PCIe bridge device.  This cascades through
+	 * bus_generic_detach() to all downstream devices (bge, etc.),
+	 * preventing hangs from MII reads on dead hardware.
+	 *
+	 * bus_topo_lock is required: device_detach() asserts it.
+	 */
+	dc = devclass_find("tbolt");
+	if (dc != NULL) {
+		tbolt = devclass_get_device(dc, device_get_unit(hcm->dev));
+		if (tbolt != NULL) {
+			tb_printf(hcm, "TB disconnect: removing %s\n",
+			    device_get_nameunit(tbolt));
+			bus_topo_lock();
+			device_delete_child(device_get_parent(tbolt), tbolt);
+			bus_topo_unlock();
+		}
+	}
 }
 
 static void
@@ -124,8 +282,19 @@ hcm_cfg_task(void *arg, int pending)
 	u_int error, i, offset;
 
 	hcm = (struct hcm_softc *)arg;
+	hcm->discovery_pending = 0;
 
 	tb_debug(hcm, DBG_HCM|DBG_EXTRA, "hcm_cfg_task called\n");
+
+	/* Ensure FW CM mode is set before first discovery. */
+	if (NHI_IS_FW_CM(hcm->nsc))
+		nhi_ensure_fw_cm_mode(hcm->nsc);
+
+	if (hcm->nsc->fw_safe_mode) {
+		tb_debug(hcm, DBG_HCM,
+		    "Firmware in safe mode, skipping discovery\n");
+		return;
+	}
 
 	buf = malloc(8 * 4, M_THUNDERBOLT, M_NOWAIT|M_ZERO);
 	if (buf == NULL) {
@@ -136,7 +305,9 @@ hcm_cfg_task(void *arg, int pending)
 	rsc = hcm->nsc->root_rsc;
 	error = tb_config_router_read(rsc, 0, 5, buf);
 	if (error != 0) {
-		free(buf, M_NHI);
+		/* Root router unreachable: cable unplugged. */
+		free(buf, M_THUNDERBOLT);
+		hcm_disconnect(hcm);
 		return;
 	}
 
@@ -209,15 +380,33 @@ hcm_cfg_task(void *arg, int pending)
 		    CAP_LANE_STATE_CL0) {
 			tb_route_t newr;
 
-			newr.hi = rsc->route.hi;
-			newr.lo = rsc->route.lo | (i << rsc->depth * 8);
+			newr = TB_CHILD_ROUTE(rsc, i);
 
 			tb_printf(hcm, "want to add router at 0x%08x%08x\n",
 			    newr.hi, newr.lo);
 			error = tb_router_attach(rsc, newr);
 			tb_printf(rsc, "tb_router_attach returned %d\n", error);
+			if (error == 0)
+				hcm->connected = 1;
+		} else if (rsc->adapters != NULL && i <= rsc->max_adap &&
+		    rsc->adapters[i] != NULL) {
+			/* Lane dropped out of CL0: device disconnected. */
+			tb_printf(hcm, "TB disconnect on adapter %d\n", i);
+			error = tb_router_detach(rsc->adapters[i]);
+			if (error != 0)
+				tb_printf(hcm,
+				    "Failed to detach router on adapter %d: %d\n",
+				    i, error);
 		}
 	}
 
 	free(buf, M_THUNDERBOLT);
+
+	/* Discover existing DP tunnels on firmware-managed controllers. */
+	if (hcm->nsc->firmware_managed)
+		tb_tunnel_discover_dp(rsc);
+
+	/* Rescan sibling PCI buses for newly-visible devices. */
+	if (hcm->connected)
+		hcm_pci_rescan(hcm);
 }

@@ -48,6 +48,7 @@
 #include <vm/pmap.h>
 
 #include <machine/bus.h>
+#include <machine/atomic.h>
 #include <machine/stdarg.h>
 
 #include <dev/thunderbolt/nhi_reg.h>
@@ -75,6 +76,13 @@ static int nhi_init(struct nhi_softc *);
 static void nhi_post_init(void *);
 static int nhi_tx_enqueue(struct nhi_ring_pair *, struct nhi_cmd_frame *);
 static int nhi_setup_sysctl(struct nhi_softc *);
+static int nhi_set_fw_cm_mode(struct nhi_softc *);
+static int nhi_valid_mbox_connmode(uint32_t);
+static int nhi_wait_fw_cm_ready(struct nhi_softc *);
+static int nhi_wait_outmail_ready(struct nhi_softc *, uint32_t *);
+static int nhi_firmware_start(struct nhi_softc *);
+static int nhi_firmware_reset(struct nhi_softc *);
+static int nhi_detect_fw_mode(struct nhi_softc *);
 
 SYSCTL_NODE(_hw, OID_AUTO, nhi, CTLFLAG_RD, 0, "NHI Driver Parameters");
 
@@ -84,6 +92,19 @@ MALLOC_DEFINE(M_NHI, "nhi", "nhi driver memory");
 #define NHI_DEBUG_LEVEL 0
 #endif
 
+/* 0 = default, 1 = force-on, 2 = force-off */
+#ifndef NHI_FORCE_HCM
+#define NHI_FORCE_HCM 0
+#endif
+/*
+ * Default firmware connection manager mode is Certified/Any Depth.
+ * Relax to ANY_* only if you must allow uncertified devices.
+ */
+#ifndef NHI_MBOX_CONNMODE
+#define NHI_MBOX_CONNMODE INMAILCMD_SETMODE_CERT_TB_ANY_DEPTH
+#endif
+#define NHI_FW_CM_READY_TIMEOUT_SEC 5
+
 void
 nhi_get_tunables(struct nhi_softc *sc)
 {
@@ -91,10 +112,25 @@ nhi_get_tunables(struct nhi_softc *sc)
 	device_t ufp;
 	char	tmpstr[80], oid[80];
 	u_int	val;
+	char	*maker;
+	bool	is_apple;
 
 	/* Set local defaults */
 	sc->debug = NHI_DEBUG_LEVEL;
 	sc->max_ring_count = NHI_DEFAULT_NUM_RINGS;
+	sc->force_hcm = NHI_FORCE_HCM;
+	sc->mbox_connmode = NHI_MBOX_CONNMODE;
+	sc->firmware_managed = !NHI_IS_FW_CM(sc);
+
+	is_apple = false;
+	maker = kern_getenv("smbios.system.maker");
+	if (maker != NULL) {
+		if (strcasestr(maker, "Apple") != NULL)
+			is_apple = true;
+		freeenv(maker);
+	}
+	if (is_apple)
+		sc->firmware_managed = 1;
 
 	/* Inherit setting from the upstream thunderbolt switch node */
 	val = TB_GET_DEBUG(sc->dev, &sc->debug);
@@ -122,6 +158,14 @@ nhi_get_tunables(struct nhi_softc *sc)
 		val = min(val, NHI_MAX_NUM_RINGS);
 		sc->max_ring_count = max(val, 1);
 	}
+	if (TUNABLE_INT_FETCH("hw.nhi.force_hcm", &val) != 0)
+		sc->force_hcm = val;
+	if (NHI_IS_FW_CM(sc) && !is_apple) {
+		if (TUNABLE_INT_FETCH("hw.nhi.firmware_managed", &val) != 0)
+			sc->firmware_managed = (val != 0);
+	}
+	if (TUNABLE_INT_FETCH("hw.nhi.connmode", &val) != 0)
+		sc->mbox_connmode = val;
 
 	/* Grab instance variables */
 	bzero(oid, 80);
@@ -135,8 +179,33 @@ nhi_get_tunables(struct nhi_softc *sc)
 		val = min(val, NHI_MAX_NUM_RINGS);
 		sc->max_ring_count = max(val, 1);
 	}
+	snprintf(tmpstr, sizeof(tmpstr), "dev.nhi.%d.force_hcm",
+	    device_get_unit(sc->dev));
+	if (TUNABLE_INT_FETCH(tmpstr, &val) != 0)
+		sc->force_hcm = val;
+	if (NHI_IS_FW_CM(sc) && !is_apple) {
+		snprintf(tmpstr, sizeof(tmpstr), "dev.nhi.%d.firmware_managed",
+		    device_get_unit(sc->dev));
+		if (TUNABLE_INT_FETCH(tmpstr, &val) != 0)
+			sc->firmware_managed = (val != 0);
+	}
+	snprintf(tmpstr, sizeof(tmpstr), "dev.nhi.%d.connmode",
+	    device_get_unit(sc->dev));
+	if (TUNABLE_INT_FETCH(tmpstr, &val) != 0)
+		sc->mbox_connmode = val;
 
 	return;
+}
+
+static void
+nhi_configure_caps(struct nhi_softc *sc)
+{
+
+	if (NHI_IS_USB4(sc) || NHI_IS_FW_CM(sc) ||
+	    (sc->force_hcm == NHI_FORCE_HCM_ON))
+		sc->caps |= NHI_CAP_HCM;
+	if (sc->force_hcm == NHI_FORCE_HCM_OFF)
+		sc->caps &= ~NHI_CAP_HCM;
 }
 
 struct nhi_cmd_frame *
@@ -187,24 +256,40 @@ nhi_inmail_cmd(struct nhi_softc *sc, uint32_t cmd, uint32_t data)
 	if (val & INMAILCMD_ERROR)
 		tb_debug(sc, DBG_MBOX, "Error already set in INMAILCMD\n");
 	if (val & INMAILCMD_OPREQ) {
-		mtx_unlock(&sc->nhi_mtx);
 		tb_debug(sc, DBG_MBOX,
 		    "INMAILCMD request already in progress\n");
-		return (EBUSY);
+		timeout = NHI_MAILBOX_TIMEOUT;
+		while (timeout > 0) {
+			DELAY(1000);	/* 1ms poll */
+			val = nhi_read_reg(sc, TBT_INMAILCMD);
+			if ((val & INMAILCMD_OPREQ) == 0)
+				break;
+			timeout--;
+		}
+		if (val & INMAILCMD_OPREQ) {
+			tb_printf(sc, "Timeout waiting for mailbox\n");
+			sc->hwflags &= ~NHI_MBOX_BUSY;
+			mtx_unlock(&sc->nhi_mtx);
+			return (ETIMEDOUT);
+		}
 	}
 
 	nhi_write_reg(sc, TBT_INMAILDATA, data);
-	nhi_write_reg(sc, TBT_INMAILCMD, cmd | INMAILCMD_OPREQ);
+	val = nhi_read_reg(sc, TBT_INMAILCMD);
+	val &= ~(INMAILCMD_CMD_MASK | INMAILCMD_ERROR);
+	val |= INMAILCMD_OPREQ | cmd;
+	nhi_write_reg(sc, TBT_INMAILCMD, val);
 
-	/* Poll at 1s intervals */
+	/* Poll at 1ms intervals, up to NHI_MAILBOX_TIMEOUT ms */
 	timeout = NHI_MAILBOX_TIMEOUT;
-	while (timeout--) {
-		DELAY(1000000);
+	while (timeout > 0) {
+		DELAY(1000);	/* 1ms */
 		val = nhi_read_reg(sc, TBT_INMAILCMD);
 		tb_debug(sc, DBG_MBOX|DBG_EXTRA,
 		    "Polling INMAILCMD= 0x%08x\n", val);
 		if ((val & INMAILCMD_OPREQ) == 0)
 			break;
+		timeout--;
 	}
 	sc->hwflags &= ~NHI_MBOX_BUSY;
 	mtx_unlock(&sc->nhi_mtx);
@@ -249,13 +334,19 @@ nhi_attach(struct nhi_softc *sc)
 	/*
 	 * Get the number of TX/RX paths.  This sizes some of the register
 	 * arrays during allocation and initialization.  USB4 spec says that
-	 * the max is 21.
+	 * the max is 21, but older Thunderbolt 1/2 controllers (Light Ridge,
+	 * Falcon Ridge) report 32.  Alpine Ridge reports 12.
 	 */
 	val = GET_HOST_CAPS_PATHS(nhi_read_reg(sc, NHI_HOST_CAPS));
 	tb_debug(sc, DBG_INIT|DBG_NOISY, "Total Paths= %d\n", val);
-	if (val == 0 || val > 21) {
-		tb_printf(sc, "WARN: unexpected number of paths: %d\n", val);
-		/* return (ENXIO); */
+	if (val == 0) {
+		tb_printf(sc, "WARN: path count is 0\n");
+		return (ENXIO);
+	}
+	if (val > NHI_MAX_NUM_RINGS) {
+		tb_printf(sc, "WARN: path count %d > %d, clamping\n", val,
+		    NHI_MAX_NUM_RINGS);
+		val = NHI_MAX_NUM_RINGS;
 	}
 	sc->path_count = val;
 
@@ -268,12 +359,17 @@ nhi_attach(struct nhi_softc *sc)
 		nhi_configure_ring(sc, sc->ring0);
 		nhi_activate_ring(sc->ring0);
 		nhi_fill_rx_ring(sc, sc->ring0);
+		/* Give hardware time to stabilize after interrupt enable */
+		DELAY(100000); /* 100ms */
 	}
 
 	if (error == 0)
 		error = tbdev_add_interface(sc);
 
-	error = hcm_attach(sc);
+	if ((error == 0) && (NHI_USE_ICM(sc)))
+		tb_printf(sc, "WARN: device uses an internal connection manager\n");
+	if ((error == 0) && (NHI_USE_HCM(sc)))
+		error = hcm_attach(sc);
 
 	if (error == 0)
 		error = nhi_init(sc);
@@ -289,6 +385,7 @@ nhi_detach(struct nhi_softc *sc)
 	if (sc->root_rsc != NULL)
 		tb_router_detach(sc->root_rsc);
 
+	tbdev_remove_domain(sc->uuid);
 	tbdev_remove_interface(sc);
 
 	nhi_pci_disable_interrupts(sc);
@@ -375,18 +472,22 @@ nhi_alloc_ring(struct nhi_softc *sc, int ringnum, int tx_depth, int rx_depth,
 	if ((error = bus_dma_template_tag(&t, &r->ring_dmat)) != 0) {
 		tb_printf(sc, "Cannot allocate ring %d DMA tag: %d\n",
 		    ringnum, error);
-		return (ENOMEM);
+		goto fail;
 	}
-	if (bus_dmamem_alloc(r->ring_dmat, (void **)&ring, BUS_DMA_NOWAIT,
-	    &r->ring_map)) {
-		tb_printf(sc, "Cannot allocate ring memory\n");
-		return (ENOMEM);
+	error = bus_dmamem_alloc(r->ring_dmat, (void **)&ring, BUS_DMA_NOWAIT,
+	    &r->ring_map);
+	if (error != 0) {
+		tb_printf(sc, "Cannot allocate ring memory: %d\n", error);
+		goto fail;
 	}
-	bzero(ring, ring_size);
-	bus_dmamap_load(r->ring_dmat, r->ring_map, ring, ring_size,
-	    nhi_memaddr_cb, &ring_busaddr, 0);
-
 	r->ring = ring;
+	bzero(ring, ring_size);
+	error = bus_dmamap_load(r->ring_dmat, r->ring_map, ring, ring_size,
+	    nhi_memaddr_cb, &ring_busaddr, 0);
+	if (error != 0) {
+		tb_printf(sc, "Cannot map ring memory: %d\n", error);
+		goto fail;
+	}
 
 	r->tx_ring = (union nhi_ring_desc *)(ring);
 	r->tx_ring_busaddr = ring_busaddr;
@@ -402,6 +503,18 @@ nhi_alloc_ring(struct nhi_softc *sc, int ringnum, int tx_depth, int rx_depth,
 
 	*rp = r;
 	return (0);
+fail:
+	if (r->ring != NULL) {
+		bus_dmamem_free(r->ring_dmat, r->ring, r->ring_map);
+		r->ring = NULL;
+	}
+	if (r->ring_dmat != NULL) {
+		bus_dma_tag_destroy(r->ring_dmat);
+		r->ring_dmat = NULL;
+	}
+	mtx_destroy(&r->mtx);
+	free(r, M_NHI);
+	return (error);
 }
 
 static void
@@ -538,27 +651,37 @@ nhi_alloc_ring0(struct nhi_softc *sc)
 	bus_dma_template_init(&t, sc->parent_dmat);
 	t.maxsize = t.maxsegsize = size;
 	t.nsegments = 1;
-	if (bus_dma_template_tag(&t, &sc->ring0_dmat)) {
+	error = bus_dma_template_tag(&t, &sc->ring0_dmat);
+	if (error != 0) {
 		tb_printf(sc, "Error allocating control ring buffer tag\n");
-		return (ENOMEM);
+		goto fail;
 	}
 
-	if (bus_dmamem_alloc(sc->ring0_dmat, (void **)&frames, BUS_DMA_NOWAIT,
-	    &sc->ring0_map) != 0) {
-		tb_printf(sc, "Error allocating control ring memory\n");
-		return (ENOMEM);
+	error = bus_dmamem_alloc(sc->ring0_dmat, (void **)&frames, BUS_DMA_NOWAIT,
+	    &sc->ring0_map);
+	if (error != 0) {
+		tb_printf(sc, "Error allocating control ring memory: %d\n",
+		    error);
+		goto fail;
 	}
-	bzero(frames, size);
-	bus_dmamap_load(sc->ring0_dmat, sc->ring0_map, frames, size,
-	    nhi_memaddr_cb, &frames_busaddr, 0);
-	sc->ring0_frames_busaddr = frames_busaddr;
 	sc->ring0_frames = frames;
+	bzero(frames, size);
+	error = bus_dmamap_load(sc->ring0_dmat, sc->ring0_map, frames, size,
+	    nhi_memaddr_cb, &frames_busaddr, 0);
+	if (error != 0) {
+		tb_printf(sc, "Error mapping control ring memory: %d\n",
+		    error);
+		goto fail;
+	}
+	sc->ring0_frames_busaddr = frames_busaddr;
 
 	/* Allocate the driver command trackers */
 	sc->ring0_cmds = malloc(sizeof(struct nhi_cmd_frame) *
 	    (r->tx_ring_depth + r->rx_ring_depth), M_NHI, M_NOWAIT | M_ZERO);
-	if (sc->ring0_cmds == NULL)
-		return (ENOMEM);
+	if (sc->ring0_cmds == NULL) {
+		error = ENOMEM;
+		goto fail;
+	}
 
 	/* Initialize the RX frames so they can be used */
 	mtx_lock(&r->mtx);
@@ -593,6 +716,29 @@ nhi_alloc_ring0(struct nhi_softc *sc)
 	SLIST_INSERT_HEAD(&sc->ring_list, r, ring_link);
 
 	return (0);
+fail:
+	if (sc->ring0_cmds != NULL) {
+		free(sc->ring0_cmds, M_NHI);
+		sc->ring0_cmds = NULL;
+	}
+	if (sc->ring0_frames_busaddr != 0) {
+		bus_dmamap_unload(sc->ring0_dmat, sc->ring0_map);
+		sc->ring0_frames_busaddr = 0;
+	}
+	if (sc->ring0_frames != NULL) {
+		bus_dmamem_free(sc->ring0_dmat, sc->ring0_frames,
+		    sc->ring0_map);
+		sc->ring0_frames = NULL;
+	}
+	if (sc->ring0_dmat != NULL) {
+		bus_dma_tag_destroy(sc->ring0_dmat);
+		sc->ring0_dmat = NULL;
+	}
+	if (r != NULL) {
+		nhi_free_ring(r);
+		free(r, M_NHI);
+	}
+	return (error);
 }
 
 static void
@@ -682,6 +828,12 @@ nhi_init(struct nhi_softc *sc)
 	 * The root router always has a route of 0x0...0, so set it statically
 	 * here.
 	 */
+	if (sc->fw_safe_mode) {
+		tb_printf(sc, "Firmware in safe mode, skipping root router attach\n");
+		nhi_deactivate_ring(sc->ring0);
+		return (0);
+	}
+
 	if ((error = tb_router_attach_root(sc, root_route)) != 0)
 		tb_printf(sc, "tb_router_attach_root()  error."
 		    "  The driver should be loaded at boot\n");
@@ -723,6 +875,24 @@ nhi_post_init(void *arg)
 	    "%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x\n",
 	    u[15], u[14], u[13], u[12], u[11], u[10], u[9], u[8], u[7],
 	    u[6], u[5], u[4], u[3], u[2], u[1], u[0]);
+
+	if (NHI_IS_FW_CM(sc)) {
+		if (!sc->firmware_managed) {
+			error = nhi_set_fw_cm_mode(sc);
+			if (error != 0)
+				tb_printf(sc,
+				    "Failed to set FW CM mode: %d\n",
+				    error);
+		} else {
+			tb_printf(sc, "Firmware-managed CM enabled\n");
+		}
+	}
+
+	(void)tbdev_add_domain(sc->uuid);
+
+	/* Discover devices already connected at load time. */
+	if (NHI_USE_HCM(sc) && sc->hcm != NULL)
+		hcm_router_discover(sc->hcm);
 
 	config_intrhook_disestablish(&sc->ich);
 }
@@ -798,23 +968,25 @@ nhi_tx_synchronous(struct nhi_ring_pair *r, struct nhi_cmd_frame *cmd)
 		count = cmd->timeout * 100;
 
 		/* Enter the loop at least once */
-		while ((count-- > 0) && (cmd->flags & CMD_REQ_COMPLETE) == 0) {
+		while ((count-- > 0) &&
+		    (atomic_load_acq_16(&cmd->flags) & CMD_REQ_COMPLETE) == 0) {
 			DELAY(10000);
 			rmb();
 			nhi_intr(r->tracker);
 		}
 	} else {
 		error = msleep(cmd, &r->mtx, PCATCH, "nhi_tx", cmd->timeout);
-		if ((error == 0) && (cmd->flags & CMD_REQ_COMPLETE) != 0)
+		if ((error == 0) &&
+		    (atomic_load_acq_16(&cmd->flags) & CMD_REQ_COMPLETE) != 0)
 			error = EWOULDBLOCK;
 	}
 
-	if ((cmd->flags & CMD_REQ_COMPLETE) == 0)
+	if ((atomic_load_acq_16(&cmd->flags) & CMD_REQ_COMPLETE) == 0)
 		error = ETIMEDOUT;
 
 	tb_debug(r->sc, DBG_TXQ|DBG_FULL, "tx_synchronous done waiting, "
 	    "err= %d, TX_COMPLETE= %d\n", error,
-	    !!(cmd->flags & CMD_REQ_COMPLETE));
+	    !!(atomic_load_acq_16(&cmd->flags) & CMD_REQ_COMPLETE));
 
 	if (error == ERESTART) {
 		tb_printf(r->sc, "TX command interrupted\n");
@@ -844,8 +1016,7 @@ nhi_tx_complete(struct nhi_ring_pair *r, struct nhi_tx_buffer_desc *desc,
 		tb_debug(sc, DBG_TXQ,
 		    "warning, TX descriptor DONE flag not set\n");
 
-	/* XXX Atomics */
-	cmd->flags |= CMD_REQ_COMPLETE;
+	atomic_set_short(&cmd->flags, CMD_REQ_COMPLETE);
 
 	txpdf = &r->tracker->txpdf[sof];
 	if (txpdf->cb != NULL) {
@@ -884,8 +1055,14 @@ nhi_rx_complete(struct nhi_ring_pair *r, struct nhi_rx_post_desc *desc,
 		return (0);
 	}
 
-	tb_debug(sc, DBG_INTR, "Unhandled RX frame %s\n",
-	    tb_get_string(eof, nhi_frame_pdf));
+	/*
+	 * PDF_HOTPLUG frames arrive before the router registers its
+	 * callback during attach, and continuously in firmware safe
+	 * mode where no router attaches at all.  Silently drop them.
+	 */
+	if (eof != PDF_HOTPLUG)
+		tb_debug(sc, DBG_INTR, "Unhandled RX frame %s\n",
+		    tb_get_string(eof, nhi_frame_pdf));
 
 	return (0);
 }
@@ -1123,6 +1300,375 @@ nhi_setup_sysctl(struct nhi_softc *sc)
 	SYSCTL_ADD_U16(ctx, SYSCTL_CHILDREN(tree), OID_AUTO,
 	    "max_rings", CTLFLAG_RD, &sc->max_ring_count, 0,
 	    "Max number of rings available");
+	SYSCTL_ADD_U8(ctx, SYSCTL_CHILDREN(tree), OID_AUTO,
+	    "force_hcm", CTLFLAG_RD, &sc->force_hcm, 0,
+	    "Force on/off the function of the host connection manager");
+	SYSCTL_ADD_U8(ctx, SYSCTL_CHILDREN(tree), OID_AUTO,
+	    "connmode", CTLFLAG_RD, &sc->mbox_connmode, 0,
+	    "FW CM mode (set via hw.nhi.connmode or dev.nhi.N.connmode)");
+	SYSCTL_ADD_U8(ctx, SYSCTL_CHILDREN(tree), OID_AUTO,
+	    "firmware_managed", CTLFLAG_RD, &sc->firmware_managed, 0,
+	    "Firmware-managed connection manager");
 
 	return (0);
+}
+
+static int
+nhi_valid_mbox_connmode(uint32_t mode)
+{
+
+	switch (mode) {
+	case INMAILCMD_SETMODE_CERT_TB_1ST_DEPTH:
+	case INMAILCMD_SETMODE_ANY_TB_1ST_DEPTH:
+	case INMAILCMD_SETMODE_CERT_TB_ANY_DEPTH:
+	case INMAILCMD_SETMODE_ANY_TB_ANY_DEPTH:
+		return (1);
+	default:
+		return (0);
+	}
+}
+
+static int
+nhi_set_fw_cm_mode(struct nhi_softc *sc)
+{
+	uint32_t mode;
+	uint32_t out;
+	int error;
+
+	mode = sc->mbox_connmode;
+	if (!nhi_valid_mbox_connmode(mode)) {
+		tb_printf(sc, "Invalid FW CM mode 0x%x, using default\n",
+		    mode);
+		mode = NHI_MBOX_CONNMODE;
+		sc->mbox_connmode = mode;
+	}
+
+	/*
+	 * Run the full firmware detection and reset flow.
+	 * This attempts to start firmware if not running, performs
+	 * CIO reset if needed, and detects safe mode.
+	 */
+	error = nhi_detect_fw_mode(sc);
+	if (error != 0) {
+		tb_printf(sc,
+		    "Cannot enter FW CM mode (%d)\n", error);
+		return (error);
+	}
+
+	/*
+	 * Firmware is in CM mode — wait for it to be ready,
+	 * then configure the connection security policy.
+	 */
+	error = nhi_wait_fw_cm_ready(sc);
+	if (error != 0) {
+		tb_printf(sc,
+		    "FW CM not ready after mode detection (%d)\n", error);
+		sc->fw_safe_mode = 1;
+		return (error);
+	}
+
+	error = nhi_wait_outmail_ready(sc, &out);
+	if (error != 0) {
+		tb_printf(sc, "Outmailcmd not ready (%d)\n", error);
+		sc->fw_safe_mode = 1;
+		return (error);
+	}
+
+	tb_printf(sc, "Outmailcmd: 0x%08x (%s)\n", out,
+	    tb_get_string(out & OUTMAILCMD_OPMODE_MASK,
+	    nhi_outmailcmd_opmode));
+
+	tb_printf(sc, "FW CM mode: %s\n",
+	    tb_get_string(mode, tb_mbox_connmode));
+	error = nhi_inmail_cmd(sc, mode, 0);
+	if (error != 0)
+		return (error);
+
+	/* Authorize already-connected devices to stop hotplug storm. */
+	return (nhi_inmail_cmd(sc, INMAILCMD_SAVE_CONNECTED, 0));
+}
+
+int
+nhi_ensure_fw_cm_mode(struct nhi_softc *sc)
+{
+	int error;
+
+	if (sc->fw_cm_set)
+		return (0);
+	if (sc->fw_safe_mode)
+		return (ENODEV);
+	error = nhi_set_fw_cm_mode(sc);
+	if (error == 0 && !sc->fw_safe_mode)
+		sc->fw_cm_set = 1;
+	return (error);
+}
+
+static int
+nhi_wait_fw_cm_ready(struct nhi_softc *sc)
+{
+	uint32_t val;
+	int i;
+
+	for (i = 0; i < NHI_FW_CM_READY_TIMEOUT_SEC * 10; i++) {
+		val = nhi_read_reg(sc, TBT_FW_STATUS);
+		if (val & FWSTATUS_CM_READY)
+			return (0);
+		pause("tbtfw", hz / 10);
+	}
+
+	tb_printf(sc, "FW CM not ready, FW_STATUS=0x%08x\n", val);
+	return (ETIMEDOUT);
+}
+
+static int
+nhi_wait_outmail_ready(struct nhi_softc *sc, uint32_t *outp)
+{
+	uint32_t out;
+	int i;
+
+	out = 0;
+	for (i = 0; i < NHI_FW_CM_READY_TIMEOUT_SEC * 10; i++) {
+		out = nhi_read_reg(sc, TBT_OUTMAILCMD);
+		if ((out & OUTMAILCMD_STATUS_BUSY) == 0)
+			break;
+		pause("tbtmb", hz / 10);
+	}
+
+	if (outp != NULL)
+		*outp = out;
+
+	if (out & OUTMAILCMD_STATUS_BUSY) {
+		tb_printf(sc, "Mailbox busy, OUTMAILCMD=0x%08x\n", out);
+		return (ETIMEDOUT);
+	}
+
+	return (0);
+}
+
+/*
+ * Firmware initialization and reset functions.
+ * Ported from Linux ICM driver (drivers/thunderbolt/icm.c).
+ */
+
+/*
+ * Read the firmware operation mode from the OUTMAILCMD register.
+ * Returns the opmode field (0=safe, 1=auth, 2=endpoint, 3=CM).
+ */
+static int
+nhi_fw_opmode(struct nhi_softc *sc)
+{
+	uint32_t val;
+
+	val = nhi_read_reg(sc, TBT_OUTMAILCMD);
+
+	/* 0xdeadbeaf or similar garbage means firmware never initialized */
+	if (val == 0xdeadbeaf || val == 0xffffffff) {
+		tb_printf(sc, "OUTMAILCMD reads 0x%08x, firmware not running\n",
+		    val);
+		return (-1);
+	}
+
+	return ((val & OUTMAILCMD_OPMODE_MASK) >> 8);
+}
+
+/*
+ * Reset the firmware CIO (Common I/O) block.
+ * Sets the CIO_RESET_REQ flag, then toggles the firmware CPU enable bits
+ * in the FW_STATUS register.  This is the equivalent of Linux's
+ * icm_firmware_reset().
+ *
+ * On Light Ridge, the CIO reset through PCIe2CIO is not available
+ * (no upstream port), so we rely solely on the FW_STATUS register poke.
+ */
+static int
+nhi_firmware_reset(struct nhi_softc *sc)
+{
+	uint32_t val;
+
+	tb_printf(sc, "Attempting firmware CIO reset\n");
+
+	/* Step 1: Request CIO reset via FW_STATUS register */
+	val = nhi_read_reg(sc, TBT_FW_STATUS);
+	val |= FWSTATUS_CIO_RESET;
+	nhi_write_reg(sc, TBT_FW_STATUS, val);
+
+	/* Step 2: Start the firmware CPU (toggle enable bits) */
+	val = nhi_read_reg(sc, TBT_FW_STATUS);
+	val |= FWSTATUS_INVERT | FWSTATUS_START;
+	nhi_write_reg(sc, TBT_FW_STATUS, val);
+
+	/*
+	 * Step 3: Send CIO_RESET command through the input mailbox.
+	 * This may timeout if firmware is truly dead, which is fine —
+	 * we'll check the result via FW_STATUS afterward.
+	 */
+	(void)nhi_inmail_cmd(sc, INMAILCMD_CIO_RESET, 0);
+
+	/* Allow firmware time to reset and reinitialize */
+	pause("tbcio", hz);
+
+	return (0);
+}
+
+/*
+ * Wait for firmware NVM authentication to complete.
+ * Returns 0 if NVM_AUTH_DONE is set, ETIMEDOUT otherwise.
+ */
+static int
+nhi_wait_nvm_auth(struct nhi_softc *sc)
+{
+	uint32_t val;
+	int i;
+
+	for (i = 0; i < 60; i++) {
+		val = nhi_read_reg(sc, TBT_FW_STATUS);
+		if (val & FWSTATUS_CM_READY)
+			return (0);
+		pause("tbnvm", hz / 20);	/* 50ms intervals, 3s total */
+	}
+
+	tb_debug(sc, DBG_INIT, "NVM auth timeout, FW_STATUS=0x%08x\n", val);
+	return (ETIMEDOUT);
+}
+
+/*
+ * Attempt to start the firmware and bring it out of safe mode.
+ * This is the equivalent of Linux's icm_firmware_start().
+ *
+ * Sequence:
+ * 1. Check if firmware is already running (FWSTATUS_ENABLE set)
+ * 2. If not, perform a CIO reset to restart it
+ * 3. Wait for NVM authentication to complete
+ * 4. Re-check the firmware mode
+ */
+static int
+nhi_firmware_start(struct nhi_softc *sc)
+{
+	uint32_t val;
+	int mode;
+	int error;
+
+	/* Check if firmware is already running */
+	val = nhi_read_reg(sc, TBT_FW_STATUS);
+	tb_printf(sc, "FW_STATUS=0x%08x\n", val);
+
+	/*
+	 * If register reads return a garbage sentinel, the firmware
+	 * MMIO region is not functional.  No point in poking registers.
+	 */
+	if (val == 0xdeadbeaf || val == 0xffffffff) {
+		tb_printf(sc, "FW_STATUS reads garbage, firmware MMIO dead\n");
+		return (ENXIO);
+	}
+
+	tb_debug(sc, DBG_INIT, "FW_STATUS:%s%s%s%s%s\n",
+	    (val & FWSTATUS_ENABLE) ? " EN" : "",
+	    (val & FWSTATUS_INVERT) ? " INV" : "",
+	    (val & FWSTATUS_START) ? " CPU" : "",
+	    (val & FWSTATUS_CIO_RESET) ? " CIO_RST" : "",
+	    (val & FWSTATUS_CM_READY) ? " CM_READY" : "");
+
+	if (val & FWSTATUS_ENABLE) {
+		tb_printf(sc, "Firmware already running (FW_STS EN bit)\n");
+		return (0);
+	}
+
+	/*
+	 * FW_STS EN bit not set, but firmware might still be alive
+	 * (e.g., warm-booted from macOS).  Check the mailbox before
+	 * attempting a destructive CIO reset.
+	 */
+	mode = nhi_fw_opmode(sc);
+	if (mode == 3) {	/* CM mode — firmware is alive */
+		tb_printf(sc, "Firmware alive (CM mode), skipping reset\n");
+		return (0);
+	}
+	if (mode >= 0 && mode != 0) {
+		tb_printf(sc, "Firmware in mode %d, skipping reset\n", mode);
+		return (0);
+	}
+
+	/*
+	 * Firmware is not running.  Attempt a CIO reset to restart it.
+	 * This is our best shot at getting Light Ridge out of safe mode.
+	 */
+	error = nhi_firmware_reset(sc);
+	if (error != 0) {
+		tb_printf(sc, "Firmware reset failed: %d\n", error);
+		return (error);
+	}
+
+	/* Wait for NVM authentication to complete after reset */
+	error = nhi_wait_nvm_auth(sc);
+	if (error != 0) {
+		tb_printf(sc, "NVM auth did not complete after reset\n");
+		/* Not fatal — firmware may still be in safe mode */
+	}
+
+	/* Re-read the mode after reset attempt */
+	mode = nhi_fw_opmode(sc);
+	tb_printf(sc, "Post-reset firmware mode: %d (%s)\n", mode,
+	    (mode < 0) ? "not running" :
+	    (mode == 0) ? "safe" :
+	    (mode == 3) ? "CM" : "other");
+
+	return (0);
+}
+
+/*
+ * Detect the firmware mode and set fw_safe_mode accordingly.
+ * If firmware is in safe mode or not running, attempt a reset.
+ * This is called early during NHI initialization, before any
+ * router or topology operations.
+ *
+ * Equivalent of Linux's icm_firmware_init() + icm_driver_ready().
+ */
+static int
+nhi_detect_fw_mode(struct nhi_softc *sc)
+{
+	int error, mode;
+
+	sc->fw_safe_mode = 0;
+
+	/* Try to start firmware if it's not running */
+	error = nhi_firmware_start(sc);
+	if (error != 0) {
+		/*
+		 * Firmware MMIO is dead — registers return garbage.
+		 * This typically means the Light Ridge NVM is
+		 * corrupted or was never programmed by macOS.
+		 * Nothing we can do except bail out cleanly.
+		 */
+		tb_printf(sc, "Firmware startup failed (%d)\n", error);
+		sc->fw_safe_mode = 1;
+		return (error);
+	}
+
+	/* Read the current firmware mode */
+	mode = nhi_fw_opmode(sc);
+
+	if (mode < 0) {
+		tb_printf(sc, "Firmware not responding, entering safe mode\n");
+		sc->fw_safe_mode = 1;
+		return (ENODEV);
+	}
+
+	switch (mode) {
+	case 0:	/* OUTMAILCMD_OPMODE_SAFE >> 8 */
+		tb_printf(sc,
+		    "Firmware is in safe mode (NVM may need update)\n");
+		sc->fw_safe_mode = 1;
+		return (ENODEV);
+	case 3:	/* OUTMAILCMD_OPMODE_CM_FULL >> 8 */
+		tb_printf(sc,
+		    "Firmware in CM mode, ready for enumeration\n");
+		sc->fw_safe_mode = 0;
+		return (0);
+	default:
+		tb_printf(sc,
+		    "Firmware in unexpected mode %d, entering safe mode\n",
+		    mode);
+		sc->fw_safe_mode = 1;
+		return (ENODEV);
+	}
 }

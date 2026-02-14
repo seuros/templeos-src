@@ -72,7 +72,7 @@ struct tbdev_if {
 
 struct tbdev_dm {
 	TAILQ_ENTRY(tbdev_dm)	dev_next;
-	char			uid[16];
+	char			uid[37];
 };
 
 struct tbdev_rt {
@@ -97,6 +97,15 @@ static struct mtx tbdev_mtx;
 MTX_SYSINIT(tbdev_mtx, &tbdev_mtx, "TBT Device Mutex", MTX_DEF);
 
 MALLOC_DEFINE(M_THUNDERBOLT, "thunderbolt", "memory for thunderbolt");
+
+static void
+tb_uuid_to_string(const uint8_t *u, char out[37])
+{
+	snprintf(out, 37,
+	    "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+	    u[15], u[14], u[13], u[12], u[11], u[10], u[9], u[8], u[7], u[6],
+	    u[5], u[4], u[3], u[2], u[1], u[0]);
+}
 
 static void
 tbdev_init(void *arg)
@@ -165,6 +174,29 @@ tbdev_remove_interface(struct nhi_softc *nhi)
 int
 tbdev_add_domain(void *domain)
 {
+	struct tbdev_dm *dm, *cursor;
+	char uuid_str[37];
+	const uint8_t *uuid = domain;
+
+	if (uuid == NULL)
+		return (EINVAL);
+
+	tb_uuid_to_string(uuid, uuid_str);
+	dm = malloc(sizeof(*dm), M_THUNDERBOLT, M_ZERO|M_NOWAIT);
+	if (dm == NULL)
+		return (ENOMEM);
+	strlcpy(dm->uid, uuid_str, sizeof(dm->uid));
+
+	mtx_lock(&tbdev_mtx);
+	TAILQ_FOREACH(cursor, &tbdomain_head, dev_next) {
+		if (strcmp(cursor->uid, uuid_str) == 0) {
+			mtx_unlock(&tbdev_mtx);
+			free(dm, M_THUNDERBOLT);
+			return (0);
+		}
+	}
+	TAILQ_INSERT_TAIL(&tbdomain_head, dm, dev_next);
+	mtx_unlock(&tbdev_mtx);
 
 	return (0);
 }
@@ -172,6 +204,26 @@ tbdev_add_domain(void *domain)
 int
 tbdev_remove_domain(void *domain)
 {
+	struct tbdev_dm *dm, *dm_back;
+	char uuid_str[37];
+	const uint8_t *uuid = domain;
+
+	if (uuid == NULL)
+		return (EINVAL);
+
+	tb_uuid_to_string(uuid, uuid_str);
+
+	mtx_lock(&tbdev_mtx);
+	TAILQ_FOREACH_SAFE(dm, &tbdomain_head, dev_next, dm_back) {
+		if (strcmp(dm->uid, uuid_str) == 0) {
+			TAILQ_REMOVE(&tbdomain_head, dm, dev_next);
+			break;
+		}
+	}
+	mtx_unlock(&tbdev_mtx);
+
+	if (dm != NULL)
+		free(dm, M_THUNDERBOLT);
 
 	return (0);
 }
@@ -179,6 +231,28 @@ tbdev_remove_domain(void *domain)
 int
 tbdev_add_router(struct router_softc *rt)
 {
+	struct tbdev_rt *entry, *cursor;
+	uint64_t route;
+
+	if (rt == NULL)
+		return (EINVAL);
+
+	route = TB_ROUTE(rt);
+	entry = malloc(sizeof(*entry), M_THUNDERBOLT, M_ZERO|M_NOWAIT);
+	if (entry == NULL)
+		return (ENOMEM);
+	entry->route = route;
+
+	mtx_lock(&tbdev_mtx);
+	TAILQ_FOREACH(cursor, &tbrouter_head, dev_next) {
+		if (cursor->route == route) {
+			mtx_unlock(&tbdev_mtx);
+			free(entry, M_THUNDERBOLT);
+			return (0);
+		}
+	}
+	TAILQ_INSERT_TAIL(&tbrouter_head, entry, dev_next);
+	mtx_unlock(&tbdev_mtx);
 
 	return (0);
 }
@@ -186,6 +260,25 @@ tbdev_add_router(struct router_softc *rt)
 int
 tbdev_remove_router(struct router_softc *rt)
 {
+	struct tbdev_rt *entry, *entry_back;
+	uint64_t route;
+
+	if (rt == NULL)
+		return (EINVAL);
+
+	route = TB_ROUTE(rt);
+
+	mtx_lock(&tbdev_mtx);
+	TAILQ_FOREACH_SAFE(entry, &tbrouter_head, dev_next, entry_back) {
+		if (entry->route == route) {
+			TAILQ_REMOVE(&tbrouter_head, entry, dev_next);
+			break;
+		}
+	}
+	mtx_unlock(&tbdev_mtx);
+
+	if (entry != NULL)
+		free(entry, M_THUNDERBOLT);
 
 	return (0);
 }
@@ -254,8 +347,9 @@ tbdev_discover(caddr_t addr)
 		TAILQ_FOREACH(rt, &tbrouter_head, dev_next)
 			nvlist_add_number(nvl, TBT_DISCOVER_ROUTER, rt->route);
 	} else {
-		printf("cannot find supported tpye\n");
+		printf("cannot find supported type\n");
 		error = EINVAL;
+		mtx_unlock(&tbdev_mtx);
 		goto out;
 	}
 	mtx_unlock(&tbdev_mtx);
@@ -263,17 +357,19 @@ tbdev_discover(caddr_t addr)
 	error = nvlist_error(nvl);
 	if (error != 0) {
 		printf("error %d state in nvlist\n", error);
-		return (error);
+		goto out;
 	}
 
 	nvlpacked = nvlist_pack(nvl, &ioc->len);
 	if (nvlpacked == NULL) {
 		printf("cannot allocate new packed buffer\n");
-		return (ENOMEM);
+		error = ENOMEM;
+		goto out;
 	}
 	if (ioc->size < ioc->len) {
 		printf("packed buffer is too big to copyout\n");
-		return (ENOSPC);
+		error = ENOSPC;
+		goto out;
 	}
 
 	error = copyout(nvlpacked, ioc->data, ioc->len);
@@ -298,15 +394,28 @@ tbdev_request(caddr_t addr)
 	int		error = 0;
 
 	if ((ioc->data == NULL) || (ioc->size == 0))
+		return (EINVAL);
+
+	nvl = nvlist_create(0);
+	if (nvl == NULL)
 		return (ENOMEM);
 
 	nvlpacked = nvlist_pack(nvl, &ioc->len);
-	if (nvlpacked == NULL)
+	if (nvlpacked == NULL) {
+		nvlist_destroy(nvl);
 		return (ENOMEM);
-	if (ioc->size < ioc->len)
-		return (ENOSPC);
+	}
+	if (ioc->size < ioc->len) {
+		error = ENOSPC;
+		goto out;
+	}
 
 	error = copyout(nvlpacked, ioc->data, ioc->len);
+out:
+	if (nvlpacked != NULL)
+		free(nvlpacked, M_NVLIST);
+	if (nvl != NULL)
+		nvlist_destroy(nvl);
 	return (error);
 }
 
