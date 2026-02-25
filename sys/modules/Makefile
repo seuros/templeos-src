@@ -175,6 +175,7 @@ SUBDIR=	\
 	${_igc} \
 	imgact_binmisc \
 	${_imx} \
+	${_intelpmc} \
 	${_intelspi} \
 	${_intelthermal} \
 	${_io} \

@@ -254,6 +254,7 @@ MAN=	aac.4 \
 	${_imcsmb.4} \
 	inet.4 \
 	inet6.4 \
+	intelpmc.4 \
 	intelthermal.4 \
 	intpm.4 \
 	intro.4 \

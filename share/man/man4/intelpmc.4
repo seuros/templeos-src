@@ -1,0 +1,93 @@
+.\"-
+.\" SPDX-License-Identifier: BSD-2-Clause
+.\"
+.\" Copyright (c) 2026 Abdelkader Boudih <freebsd@seuros.com>
+.\"
+.Dd February 23, 2026
+.Dt INTELPMC 4
+.Os
+.Sh NAME
+.Nm intelpmc
+.Nd Intel PCH Power Management Controller driver
+.Sh SYNOPSIS
+To compile this driver into the kernel,
+place the following lines in your
+kernel configuration file:
+.Bd -ragged -offset indent
+.Cd "device intelpmc"
+.Ed
+.Pp
+Alternatively, to load the driver as a
+module at boot time, place the following line in
+.Xr loader.conf 5 :
+.Bd -literal -offset indent
+intelpmc_load="YES"
+.Ed
+.Sh DESCRIPTION
+The
+.Nm
+driver exposes sleep state residency counters and power gating status
+for Intel Sunrise Point PCH (Platform Controller Hub) via
+.Xr sysctl 8 .
+.Pp
+The driver supports debugging S0ix (Modern Standby) power states by
+providing access to the cumulative time the system has spent in any
+S0ix sub-state (S0i1, S0i2, S0i3).
+.Pp
+If firmware has locked access to the PMC registers, the driver detects
+this condition at attach time and reports it via the
+.Va access_denied
+sysctl.
+All register reads return zero when access is denied.
+.Sh HARDWARE
+The
+.Nm
+driver supports the following devices:
+.Pp
+.Bl -bullet -compact
+.It
+Intel Sunrise Point-LP PMC (6th/7th Gen Core mobile, PCI ID 0x8086:0x9d21)
+.It
+Intel Sunrise Point-H PMC (6th/7th Gen Core desktop/server,
+PCI ID 0x8086:0xa121)
+.El
+.Sh SYSCTLS
+The following
+.Xr sysctl 8
+variables are available:
+.Bl -tag -width indent
+.It Va dev.intelpmc.%d.access_denied
+Set to 1 if firmware has denied access to PMC registers.
+.It Va dev.intelpmc.%d.slp_s0_residency
+Cumulative time the PCH SLP_S0 signal was asserted, in microseconds
+(100\ us per step).
+SLP_S0 is asserted only when all of the following conditions are
+met simultaneously: CPU in Package C10, PCH in low power mode,
+ModPhy lanes power-gated, and PLLs idle.
+This represents the deepest achievable S0ix platform state.
+A value that never advances indicates S0ix transitions are not
+occurring.
+.It Va dev.intelpmc.%d.ltr_ignore
+Latency Tolerance Reporting (LTR) ignore mask.
+.It Va dev.intelpmc.%d.pm_cfg
+Power Management configuration register (PM_CFG).
+.It Va dev.intelpmc.%d.pm_sts
+Power Management status register (PM_STS).
+.El
+.Sh SEE ALSO
+.Xr acpi 4 ,
+.Xr pci 4 ,
+.Xr sysctl 8
+.Pp
+Intel 100 Series Chipset Family PCH Datasheet, Volume 2, Section 4.3.53.
+.Sh HISTORY
+The
+.Nm
+driver first appeared in
+.Fx 16.0 .
+.Sh AUTHORS
+.An Abdelkader Boudih Aq Mt freebsd@seuros.com
+.Sh CAVEATS
+Only Sunrise Point PCH is supported.
+Other PCH generations (Cannon Point, Tiger Lake, etc.) have different
+register layouts and are not handled by this driver.
