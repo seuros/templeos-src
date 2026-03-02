@@ -151,6 +151,10 @@ CAMSCSI=	scsi_all.h \
 		smp_all.h
 CAMSCSIDIR=	${INCLUDEDIR}/cam/scsi
 
+.PATH: ${SRCTOP}/sys/dev/coreboot
+COREBOOT=	coreboot_ioctl.h
+COREBOOTDIR=	${INCLUDEDIR}/dev/coreboot
+
 .PATH: ${SRCTOP}/sys/fs/cd9660
 FS9660=		cd9660_mount.h \
 		cd9660_node.h \
@@ -254,6 +258,7 @@ INCSGROUPS=	INCS \
 		CAMMMC \
 		CAMNVME \
 		CAMSCSI \
+		COREBOOT \
 		CRYPTO \
 		EVDEV \
 		FS9660 \
@@ -438,6 +443,8 @@ symlinks: .PHONY .META
 	    ${SDESTDIR}${INCLUDEDIR}/dev/hyperv; \
 	${INSTALL_SYMLINK} ${TAG_ARGS:D${TAG_ARGS},dev} ../../../../sys/dev/pci/pcireg.h \
 	    ${SDESTDIR}${INCLUDEDIR}/dev/pci; \
+	${INSTALL_SYMLINK} ${TAG_ARGS:D${TAG_ARGS},dev} ../../../../sys/dev/coreboot/coreboot_ioctl.h \
+	    ${SDESTDIR}${INCLUDEDIR}/dev/coreboot; \
 	${INSTALL_SYMLINK} ${TAG_ARGS:D${TAG_ARGS},dev} ../../../../sys/dev/veriexec/veriexec_ioctl.h \
 	    ${SDESTDIR}${INCLUDEDIR}/dev/veriexec;
 .for i in ${LSUBSUBDIRS}

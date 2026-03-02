@@ -86,6 +86,7 @@ SUBDIR=	\
 	${_cfi} \
 	${_chromebook_platform} \
 	${_ciss} \
+	${_coreboot} \
 	${_coretemp} \
 	${_cpsw} \
 	${_cpuctl} \
@@ -808,6 +809,7 @@ _bytgpio=	bytgpio
 _chvgpio=	chvgpio
 _ciss=		ciss
 _chromebook_platform=	chromebook_platform
+_coreboot=	coreboot
 _coretemp=	coretemp
 .if ${MK_SOURCELESS_HOST} != "no" && empty(KCSAN_ENABLED)
 _hpt27xx=	hpt27xx
