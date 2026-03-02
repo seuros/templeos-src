@@ -129,6 +129,8 @@
         ..
         ciss
         ..
+        coreboot
+        ..
         evdev
         ..
         filemon
