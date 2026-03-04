@@ -527,8 +527,13 @@ SYSCTL_INT(_machdep, OID_AUTO, efi_rt_handle_faults, CTLFLAG_RWTUN,
     &efi_rt_handle_faults, 0,
     "Call EFI RT methods with fault handler wrapper around");
 
-static int
-efi_rt_arch_call_nofault(struct efirt_callinfo *ec)
+/*
+ * Invoke an EFI runtime service using compiler-generated ms_abi calls.
+ * EFIABI_ATTR casts let the compiler handle the SysV-to-MS ABI conversion
+ * with correct 16-byte stack alignment required by the MS x64 ABI.
+ */
+void
+efi_rt_dispatch(struct efirt_callinfo *ec)
 {
 
 	switch (ec->ec_argcnt) {
@@ -561,10 +566,8 @@ efi_rt_arch_call_nofault(struct efirt_callinfo *ec)
 		    ec->ec_arg4, ec->ec_arg5);
 		break;
 	default:
-		panic("efi_rt_arch_call: %d args", (int)ec->ec_argcnt);
+		panic("efi_rt_dispatch: %d args", (int)ec->ec_argcnt);
 	}
-
-	return (0);
 }
 
 static int
@@ -576,7 +579,7 @@ efi_call(struct efirt_callinfo *ecp)
 	if (error != 0)
 		return (error);
 	error = efi_rt_handle_faults ? efi_rt_arch_call(ecp) :
-	    efi_rt_arch_call_nofault(ecp);
+	    (efi_rt_dispatch(ecp), 0);
 	efi_leave();
 	if (error == 0)
 		error = efi_status_to_errno(ecp->ec_efi_status);

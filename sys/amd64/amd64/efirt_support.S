@@ -32,6 +32,13 @@
 
 #include "assym.inc"
 
+/*
+ * int efi_rt_arch_call(struct efirt_callinfo *ec)
+ *
+ * Fault-recovery wrapper: saves callee-saved registers, installs
+ * pcb_onfault, delegates to efi_rt_dispatch() for the actual call,
+ * then restores registers.  Returns 0 on success, EFAULT on fault.
+ */
 	.text
 ENTRY(efi_rt_arch_call)
 	pushq	%rbp
@@ -47,45 +54,17 @@ ENTRY(efi_rt_arch_call)
 	pushfq
 	popq	%rax
 	movq	%rax, EC_RFLAGS(%rdi)
+
 	movq	PCPU(CURTHREAD), %rax
 	movq	%rdi, TD_MD+MD_EFIRT_TMP(%rax)
+
 	movq	PCPU(CURPCB), %rsi
-
-	movl	EC_ARGCNT(%rdi), %ecx
-	movl	%ecx, %ebx
-	movl	$4, %eax
-	cmpl	%eax, %ecx
-	cmovbl	%eax, %ecx
-	shll	$3, %ecx
-	subq	%rcx, %rsp
-
-	cmpl	$0, %ebx
-	jz	1f
-	movq	EC_ARG1(%rdi), %rcx
-	decl	%ebx
-	jz	1f
-	movq	EC_ARG2(%rdi), %rdx
-	decl	%ebx
-	jz	1f
-	movq	EC_ARG3(%rdi), %r8
-	decl	%ebx
-	jz	1f
-	movq	EC_ARG4(%rdi), %r9
-	decl	%ebx
-	jz	1f
-	movq	EC_ARG5(%rdi), %rax
-	movq	%rax, 4*8(%rsp)
-	decl	%ebx
-	jz	1f
-	movq	$efi_rt_panic_str, %rdi
-	call	panic
-1:	movq	EC_FPTR(%rdi), %rax
 	movq	$efi_rt_fault, PCB_ONFAULT(%rsi)
-	callq	*%rax
+
+	call	efi_rt_dispatch
 
 	movq	PCPU(CURTHREAD), %rbx
 	movq	TD_MD+MD_EFIRT_TMP(%rbx), %rdi
-	movq	%rax, EC_EFI_STATUS(%rdi)
 	movq	PCPU(CURPCB), %rsi
 	xorl	%eax, %eax
 	movq	%rax, PCB_ONFAULT(%rsi)
@@ -105,6 +84,10 @@ efi_rt_arch_call_tail:
 	ret
 END(efi_rt_arch_call)
 
+/*
+ * Fault entry point: trap handler redirects here on EFI RT fault.
+ * Clears pcb_onfault, returns EFAULT through the saved register frame.
+ */
 ENTRY(efi_rt_fault)
 	xorl	%eax, %eax
 	movq	PCPU(CURPCB), %rsi
@@ -114,5 +97,3 @@ ENTRY(efi_rt_fault)
 	movq	TD_MD+MD_EFIRT_TMP(%rbx), %rdi
 	jmp	efi_rt_arch_call_tail
 END(efi_rt_fault)
-
-efi_rt_panic_str:	.asciz	"efi_rt_arch_call: too many args"
