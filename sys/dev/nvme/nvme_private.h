@@ -165,6 +165,8 @@ struct nvme_qpair {
 
 	uint32_t		num_entries;
 	uint32_t		num_trackers;
+	uint32_t		sqe_size;	/* SQ entry size in bytes (64 or 128) */
+	uint16_t		cid_base;	/* CID offset for SHARED_TAGS IO queues */
 	uint32_t		sq_tdbl_off;
 	uint32_t		cq_hdbl_off;
 
@@ -224,6 +226,10 @@ struct nvme_controller {
 #define	QUIRK_DISABLE_TIMEOUT	2		/* Disable broken completion timeout feature */
 #define	QUIRK_INTEL_ALIGNMENT	4		/* Pre NVMe 1.3 performance alignment */
 #define QUIRK_AHCI		8		/* Attached via AHCI redirect */
+#define QUIRK_APPLE_SINGLE_VECTOR  0x10	/* Single MSI-X vector (Apple T2) */
+#define QUIRK_APPLE_128_BYTES_SQES 0x20	/* 128-byte SQ entries (Apple T2) */
+#define QUIRK_APPLE_SHARED_TAGS    0x40	/* Admin/IO share CID space (Apple T2) */
+#define QUIRK_APPLE_IDENTIFY_CNS   0x80	/* Limit identify CNS <= 1 (Apple T2) */
 
 	int			resource_id;
 	struct resource		*resource;

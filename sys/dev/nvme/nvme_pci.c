@@ -92,7 +92,12 @@ static struct _pcsid
 	{ 0xa821144d,		0, 0, "Samsung PM1725", QUIRK_DELAY_B4_CHK_RDY },
 	{ 0xa822144d,		0, 0, "Samsung PM1725a", QUIRK_DELAY_B4_CHK_RDY },
 	{ 0x07f015ad,		0, 0, "VMware NVMe Controller" },
-	{ 0x2003106b,		0, 0, "Apple S3X NVMe Controller" },
+	{ 0x2003106b,		0, 0, "Apple S3X NVMe Controller",
+	    QUIRK_DELAY_B4_CHK_RDY },
+	{ 0x2005106b,		0, 0, "Apple ANS2 NVMe Controller (T2)",
+	    QUIRK_DELAY_B4_CHK_RDY | QUIRK_APPLE_SINGLE_VECTOR |
+	    QUIRK_APPLE_128_BYTES_SQES | QUIRK_APPLE_SHARED_TAGS |
+	    QUIRK_APPLE_IDENTIFY_CNS },
 	{ 0x00000000,		0, 0, NULL  }
 };
 
@@ -322,6 +327,22 @@ nvme_ctrlr_setup_interrupts(struct nvme_controller *ctrlr)
 	TUNABLE_INT_FETCH("hw.nvme.force_intx", &force_intx);
 	if (force_intx)
 		return (nvme_ctrlr_setup_shared(ctrlr, 0));
+
+	/*
+	 * Apple T2 ANS2 requires a single shared interrupt and only supports
+	 * one IO queue.  The ANS2 has no INTx pin and no MSI-X capability;
+	 * it only supports MSI.  Try MSI-X first for future-proofing, then
+	 * fall back to MSI.
+	 */
+	if (ctrlr->quirks & QUIRK_APPLE_SINGLE_VECTOR) {
+		int n = 1;
+		if (pci_alloc_msix(dev, &n) == 0 && n >= 1)
+			return (nvme_ctrlr_setup_shared(ctrlr, 1));
+		n = 1;
+		if (pci_alloc_msi(dev, &n) == 0)
+			return (nvme_ctrlr_setup_shared(ctrlr, 1));
+		return (nvme_ctrlr_setup_shared(ctrlr, 0));
+	}
 
 	if (pci_msix_count(dev) == 0)
 		goto msi;

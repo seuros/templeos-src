@@ -231,7 +231,7 @@ nvme_qpair_complete_tracker(struct nvme_tracker *tr,
 		nvme_qpair_print_completion(qpair, cpl);
 	}
 
-	qpair->act_tr[cpl->cid] = NULL;
+	qpair->act_tr[cpl->cid - qpair->cid_base] = NULL;
 
 	KASSERT(cpl->cid == req->cmd.cid, ("cpl cid does not match cmd cid\n"));
 
@@ -433,8 +433,9 @@ _nvme_qpair_process_completions(struct nvme_qpair *qpair)
 		    NVME_STATUS_GET_P(status) == NVME_STATUS_GET_P(cpl.status),
 		    ("Phase unexpectedly inconsistent"));
 
-		if (cpl.cid < qpair->num_trackers)
-			tr = qpair->act_tr[cpl.cid];
+		if (cpl.cid >= qpair->cid_base &&
+		    cpl.cid < qpair->cid_base + qpair->num_trackers)
+			tr = qpair->act_tr[cpl.cid - qpair->cid_base];
 		else
 			tr = NULL;
 
@@ -530,6 +531,26 @@ nvme_qpair_construct(struct nvme_qpair *qpair,
 	qpair->num_trackers = num_trackers;
 	qpair->ctrlr = ctrlr;
 
+	/*
+	 * Apple T2 ANS2 quirks:
+	 * - 128-byte SQ entries instead of standard 64-byte
+	 * - SHARED_TAGS: IO queue CIDs must not overlap with admin CIDs (0..
+	 *   adminq.num_trackers-1), so IO queues start their CIDs at
+	 *   adminq.num_trackers.
+	 */
+	/*
+	 * Admin queue always uses 64-byte SQ entries per NVMe spec.
+	 * APPLE_128_BYTES_SQES applies only to IO queues (CC.IOSQES).
+	 */
+	if (qpair->id != 0 && (ctrlr->quirks & QUIRK_APPLE_128_BYTES_SQES))
+		qpair->sqe_size = 128;
+	else
+		qpair->sqe_size = sizeof(struct nvme_command);
+	if ((ctrlr->quirks & QUIRK_APPLE_SHARED_TAGS) && qpair->id != 0)
+		qpair->cid_base = ctrlr->adminq.num_trackers;
+	else
+		qpair->cid_base = 0;
+
 	mtx_init(&qpair->lock, "nvme qpair lock", NULL, MTX_DEF);
 	mtx_init(&qpair->recovery, "nvme qpair recovery", NULL, MTX_DEF);
 
@@ -553,7 +574,7 @@ nvme_qpair_construct(struct nvme_qpair *qpair,
 	 * Each component must be page aligned, and individual PRP lists
 	 * cannot cross a page boundary.
 	 */
-	cmdsz = qpair->num_entries * sizeof(struct nvme_command);
+	cmdsz = qpair->num_entries * qpair->sqe_size;
 	cmdsz = roundup2(cmdsz, ctrlr->page_size);
 	cplsz = qpair->num_entries * sizeof(struct nvme_completion);
 	cplsz = roundup2(cplsz, ctrlr->page_size);
@@ -1040,7 +1061,7 @@ nvme_qpair_submit_tracker(struct nvme_qpair *qpair, struct nvme_tracker *tr)
 	mtx_assert(&qpair->lock, MA_OWNED);
 
 	req = tr->req;
-	req->cmd.cid = tr->cid;
+	req->cmd.cid = qpair->cid_base + tr->cid;
 	qpair->act_tr[tr->cid] = tr;
 	ctrlr = qpair->ctrlr;
 
@@ -1061,7 +1082,8 @@ nvme_qpair_submit_tracker(struct nvme_qpair *qpair, struct nvme_tracker *tr)
 		tr->deadline = SBT_MAX;
 
 	/* Copy the command from the tracker to the submission queue. */
-	memcpy(&qpair->cmd[qpair->sq_tail], &req->cmd, sizeof(req->cmd));
+	memcpy((uint8_t *)qpair->cmd + qpair->sq_tail * qpair->sqe_size,
+	    &req->cmd, sizeof(req->cmd));
 
 	if (++qpair->sq_tail == qpair->num_entries)
 		qpair->sq_tail = 0;
@@ -1235,7 +1257,7 @@ nvme_qpair_reset(struct nvme_qpair *qpair)
 	qpair->phase = 1;
 
 	memset(qpair->cmd, 0,
-	    qpair->num_entries * sizeof(struct nvme_command));
+	    qpair->num_entries * qpair->sqe_size);
 	memset(qpair->cpl, 0,
 	    qpair->num_entries * sizeof(struct nvme_completion));
 }

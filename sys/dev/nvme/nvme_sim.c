@@ -96,6 +96,20 @@ nvme_sim_nvmeio(struct cam_sim *sim, union ccb *ccb)
 	struct nvme_controller *ctrlr;
 
 	ctrlr = sim2ctrlr(sim);
+
+	/*
+	 * Apple T2 ANS2 (QUIRK_APPLE_IDENTIFY_CNS) does not support IDENTIFY
+	 * with CNS >= 2 (e.g., Active Namespace ID List).  Reject these before
+	 * sending to avoid confusing the firmware.
+	 */
+	if ((ctrlr->quirks & QUIRK_APPLE_IDENTIFY_CNS) &&
+	    nvmeio->cmd.opc == NVME_OPC_IDENTIFY &&
+	    le32toh(nvmeio->cmd.cdw10) >= 2) {
+		nvmeio->ccb_h.status = CAM_NVME_STATUS_ERROR;
+		xpt_done(ccb);
+		return;
+	}
+
 	payload = nvmeio->data_ptr;
 	size = nvmeio->dxfer_len;
 	/* SG LIST ??? */
@@ -396,7 +410,18 @@ nvme_sim_fail_all_ns(device_t dev)
 static int
 nvme_sim_detach(device_t dev)
 {
-	return (nvme_sim_fail_all_ns(dev));
+	struct nvme_sim_softc *sc = device_get_softc(dev);
+	int err;
+
+	err = nvme_sim_fail_all_ns(dev);
+
+	xpt_free_path(sc->s_path);
+	sc->s_path = NULL;
+	xpt_bus_deregister(cam_sim_path(sc->s_sim));
+	cam_sim_free(sc->s_sim, /*free_devq*/TRUE);
+	sc->s_sim = NULL;
+
+	return (err);
 }
 
 static int

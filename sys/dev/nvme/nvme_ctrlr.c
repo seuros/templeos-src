@@ -173,6 +173,15 @@ nvme_ctrlr_construct_io_qpairs(struct nvme_controller *ctrlr)
 	num_entries = min(num_entries, mqes + 1);
 	num_entries = min(num_entries, max_entries);
 
+	/*
+	 * Apple T2 ANS2 (SHARED_TAGS): IO queue CIDs must not overlap with
+	 * admin queue CIDs. Cap IO entries so CID space fits the controller's
+	 * internal table: admin uses CIDs 0..adminq.num_trackers-1, IO uses
+	 * the remainder up to NVME_ADMIN_ENTRIES.
+	 */
+	if (ctrlr->quirks & QUIRK_APPLE_SHARED_TAGS)
+		num_entries = min(num_entries, NVME_ADMIN_ENTRIES);
+
 	num_trackers = NVME_IO_TRACKERS;
 	TUNABLE_INT_FETCH("hw.nvme.io_trackers", &num_trackers);
 
@@ -383,7 +392,11 @@ nvme_ctrlr_enable(struct nvme_controller *ctrlr)
 	cc |= NVMEF(NVME_CC_REG_CSS, 0);
 	cc |= NVMEF(NVME_CC_REG_AMS, 0);
 	cc |= NVMEF(NVME_CC_REG_SHN, 0);
-	cc |= NVMEF(NVME_CC_REG_IOSQES, 6); /* SQ entry size == 64 == 2^6 */
+	/* Apple T2 ANS2 uses 128-byte SQ entries (2^7); standard is 64 (2^6) */
+	if (ctrlr->quirks & QUIRK_APPLE_128_BYTES_SQES)
+		cc |= NVMEF(NVME_CC_REG_IOSQES, 7);
+	else
+		cc |= NVMEF(NVME_CC_REG_IOSQES, 6); /* SQ entry size == 64 == 2^6 */
 	cc |= NVMEF(NVME_CC_REG_IOCQES, 4); /* CQ entry size == 16 == 2^4 */
 
 	/*
